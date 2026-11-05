@@ -1,5 +1,3 @@
-import os from 'node:os';
-import path from 'node:path';
 import type { AgentRuntime, RuntimeAvailability } from '@orbit/agents';
 import type { AiProvider, EffortLevel, ProviderStatusDTO, SeatResolutionDTO, TeamDTO, TeamSeat } from '@orbit/shared';
 import type { OrbitContext } from './context';
@@ -169,11 +167,6 @@ export function worktreeRoot(ctx: OrbitContext): string {
   return ctx.settings.get().execution.worktreeRoot || ctx.paths.worktrees;
 }
 
-function isInside(child: string, parent: string): boolean {
-  const rel = path.relative(parent.toLowerCase(), child.toLowerCase());
-  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
-}
-
 export async function teamStatus(ctx: OrbitContext): Promise<TeamDTO> {
   const settings = ctx.settings.get();
   const p = await providers(ctx);
@@ -203,7 +196,8 @@ export async function teamStatus(ctx: OrbitContext): Promise<TeamDTO> {
     list.push({ provider: 'codex', runtimeId: 'codex-cli', label: 'Codex', available: a.available, reason: a.reason, details: a.details, models });
   }
   const root = worktreeRoot(ctx);
-  const codexBlocked = ctx.platform === 'win32' && isInside(root, os.homedir());
+  // Codex's "unelevated" Windows sandbox runs tools inside the user folder, so worktrees can stay there.
+  const codexBlocked = false;
   return {
     providers: list,
     fallback: settings.team.fallback,
@@ -211,7 +205,7 @@ export async function teamStatus(ctx: OrbitContext): Promise<TeamDTO> {
       root,
       custom: !!settings.execution.worktreeRoot,
       codexBlocked,
-      suggestedRoot: codexBlocked ? path.join(path.parse(os.homedir()).root, 'orbit-work') : null,
+      suggestedRoot: null,
     },
   };
 }

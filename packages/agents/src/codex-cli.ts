@@ -4,6 +4,7 @@ import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { execa } from 'execa';
 import { redactSecrets, type AgentPlanItem } from '@orbit/shared';
+import { runCodexAppServer } from './codex-app-server';
 import { buildAgentEnv } from './env';
 import {
   emptyResult,
@@ -160,7 +161,9 @@ export class CodexCliRuntime implements AgentRuntime {
       ? ['exec', 'resume', resumeId, '--json', '--ignore-user-config', '--skip-git-repo-check', '-c', `sandbox_mode="${sandbox}"`]
       : ['exec', '--json', ...(req.session?.persist ? [] : ['--ephemeral']), '--ignore-user-config', '--skip-git-repo-check', '-C', req.cwd, '-s', sandbox];
     // Without the user's config, Codex on Windows refuses every command unless the sandbox mode is set.
-    if (this.platform === 'win32') args.push('-c', 'windows.sandbox="elevated"');
+    // "unelevated" still blocks network, .git writes and writes outside the project, and unlike
+    // "elevated" it lets tools installed in the user folder run (Python, Node, npm under C:/Users).
+    if (this.platform === 'win32') args.push('-c', 'windows.sandbox="unelevated"');
     if (req.access === 'workspace-write' && req.execution.allowNetworkTools) args.push('-c', 'sandbox_workspace_write.network_access=true');
     if (req.model) args.push('-m', req.model);
     if (req.effort) args.push('-c', `model_reasoning_effort="${req.effort}"`);
@@ -178,6 +181,12 @@ export class CodexCliRuntime implements AgentRuntime {
   }
 
   async run(req: AgentRunRequest, ctx: AgentRunContext): Promise<AgentRunResult> {
+    // Working sessions talk to Codex through its app-server, so messages can steer it mid-answer.
+    if (ctx.onSteerReady && !req.outputSchema) {
+      const env = buildAgentEnv(this.env, {}, false);
+      for (const k of CODEX_ENV) if (this.env[k]) env[k] = this.env[k] as string;
+      return runCodexAppServer({ bin: this.bin, env, platform: this.platform }, req, ctx);
+    }
     const started = Date.now();
     const controller = new AbortController();
     let timedOut = false;

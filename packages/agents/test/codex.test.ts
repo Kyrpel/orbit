@@ -76,7 +76,7 @@ describe('Codex arguments', () => {
     const win = new CodexCliRuntime('codex', {}, 'win32');
     const engineer = win.buildArgs(req({ model: 'gpt-6-sol', effort: 'xhigh' }), '/tmp/schema.json');
     expect(engineer).toEqual(
-      expect.arrayContaining(['exec', '--json', '--ephemeral', '--ignore-user-config', '-s', 'workspace-write', '-c', 'windows.sandbox="elevated"', '-m', 'gpt-6-sol', 'model_reasoning_effort="xhigh"', '--output-schema', '/tmp/schema.json']),
+      expect.arrayContaining(['exec', '--json', '--ephemeral', '--ignore-user-config', '-s', 'workspace-write', '-c', 'windows.sandbox="unelevated"', '-m', 'gpt-6-sol', 'model_reasoning_effort="xhigh"', '--output-schema', '/tmp/schema.json']),
     );
     expect(engineer).not.toContain('sandbox_workspace_write.network_access=true');
     expect(engineer.at(-1)).toBe('-');
@@ -84,7 +84,7 @@ describe('Codex arguments', () => {
     const linux = new CodexCliRuntime('codex', {}, 'linux');
     const reviewer = linux.buildArgs(req({ role: 'reviewer', access: 'read-only', execution: { mode: 'trusted-local', allowNetworkTools: true } }), null);
     expect(reviewer).toEqual(expect.arrayContaining(['-s', 'read-only']));
-    expect(reviewer).not.toContain('windows.sandbox="elevated"');
+    expect(reviewer).not.toContain('windows.sandbox="unelevated"');
     // Network is only ever opened for the writing sandbox, and only when allowed.
     expect(reviewer).not.toContain('sandbox_workspace_write.network_access=true');
     expect(reviewer).not.toContain('--output-schema');
@@ -170,5 +170,27 @@ describe('command parts', () => {
     expect(isAllowableCommand('sed -n 80,200p README.md')).toBe(true);
     expect(isAllowableCommand('   ')).toBe(false);
     expect(isAllowableCommand('x'.repeat(5000))).toBe(false);
+  });
+});
+
+describe('Codex app-server events', () => {
+  it('maps commands, file changes, messages, failures and plans onto Orbit steps', async () => {
+    const { translateAppServerNotification } = await import('../src');
+    const out: AgentEvent[] = [];
+    const on = (m: string, p: object) => translateAppServerNotification(m, p as Record<string, unknown>, cwd, (e) => out.push(e));
+    on('item/started', { item: { id: 'c1', type: 'commandExecution', command: `"powershell.exe" -Command 'npm test'`, status: 'inProgress' } });
+    on('item/completed', { item: { id: 'c1', type: 'commandExecution', command: 'npm test', exitCode: 1, aggregatedOutput: '1 failing', status: 'failed' } });
+    on('item/started', { item: { id: 'f1', type: 'fileChange', changes: [{ path: path.join(cwd, 'src', 'a.ts'), kind: { type: 'update' }, diff: '' }, { path: path.join(cwd, 'b.ts'), kind: { type: 'add' }, diff: '' }] } });
+    on('item/completed', { item: { id: 'm1', type: 'agentMessage', text: 'Done.' } });
+    on('item/completed', { item: { id: 'u1', type: 'userMessage' } });
+    on('turn/plan/updated', { plan: [{ step: 'Read', status: 'completed' }, { step: 'Fix', status: 'inProgress' }] });
+    expect(out).toEqual([
+      { type: 'tool', tool: 'Bash', id: 'c1', summary: 'Run npm test', step: 'run', target: 'npm test' },
+      { type: 'tool_result', isError: true, id: 'c1', summary: 'Exit code 1\n1 failing' },
+      { type: 'tool', tool: 'Edit', id: 'f1', summary: 'Edit a.ts', step: 'edit', target: 'src/a.ts' },
+      { type: 'tool', tool: 'Write', id: 'f1', summary: 'Write b.ts', step: 'edit', target: 'b.ts' },
+      { type: 'text', text: 'Done.' },
+      { type: 'tool', tool: 'TodoWrite', summary: 'Update plan (1/2 done)', step: 'plan', target: null, plan: [{ text: 'Read', status: 'completed' }, { text: 'Fix', status: 'in_progress' }] },
+    ]);
   });
 });

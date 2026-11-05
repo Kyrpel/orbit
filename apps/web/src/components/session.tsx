@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowUp, Check, ChevronDown, Copy, History, Loader2, Plus, RotateCcw, ShieldCheck, Square, Trash2, Wand2 } from 'lucide-react';
+import { AlertTriangle, ArrowUp, Check, ChevronDown, Clock3, Copy, History, Loader2, Plus, RotateCcw, ShieldCheck, Square, Trash2, Wand2, X, Zap } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { useNavigate } from 'react-router';
 import type { ChatEventDTO, ChatMessageDTO, ConversationDetailDTO, ConversationSummaryDTO, RepoDTO, SessionMode, SessionPermissionMode, TaskImprovementDTO } from '@orbit/shared';
@@ -139,6 +139,8 @@ export function Composer({
   value,
   onChange,
   onSend,
+  onSendNow,
+  steerable,
   onStop,
   running,
   sending,
@@ -149,6 +151,10 @@ export function Composer({
   value: string;
   onChange: (v: string) => void;
   onSend: () => void;
+  /** While the agent works: interrupt it and send right away. */
+  onSendNow?: () => void;
+  /** The working agent takes messages right away (otherwise they are queued). */
+  steerable?: boolean;
   onStop?: () => void;
   running: boolean;
   sending: boolean;
@@ -168,7 +174,8 @@ export function Composer({
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
-      if (value.trim() && !running && !sending) onSend();
+      // While the agent works, Enter queues the message, as in Claude Code.
+      if (value.trim() && !sending && (!running || onStop)) onSend();
     }
   };
   return (
@@ -222,11 +229,29 @@ export function Composer({
             {improve.isPending ? 'Improving…' : 'Improve'}
           </button>
           <span className="flex items-center gap-2">
-            <span className="hidden text-2xs text-dust-2 sm:inline">Enter to send, Shift+Enter for a new line</span>
+            <span className="hidden text-2xs text-dust-2 sm:inline">
+              {running && onStop && !steerable ? 'Enter to queue, Shift+Enter for a new line' : 'Enter to send, Shift+Enter for a new line'}
+            </span>
             {running && onStop ? (
-              <Button size="sm" onClick={onStop} aria-label="Stop the agent">
-                <Square className="size-3 fill-current" /> Stop
-              </Button>
+              <>
+                <Button size="sm" variant="ghost" onClick={onStop} aria-label="Stop the agent">
+                  <Square className="size-3 fill-current" /> Stop
+                </Button>
+                {onSendNow ? (
+                  <Button size="sm" onClick={onSendNow} disabled={!value.trim() || sending} title="Interrupt the agent and send this right away">
+                    <Zap className="size-3.5" /> Send now
+                  </Button>
+                ) : null}
+                {steerable ? (
+                  <Button size="sm" variant="primary" onClick={onSend} disabled={!value.trim() || sending} title="The agent reads it at its next step, without stopping">
+                    {sending ? <Loader2 className="size-4 animate-spin" /> : <ArrowUp className="size-3.5" />} Send
+                  </Button>
+                ) : (
+                  <Button size="sm" variant="primary" onClick={onSend} disabled={!value.trim() || sending} title="Send when the agent finishes">
+                    {sending ? <Loader2 className="size-4 animate-spin" /> : <Clock3 className="size-3.5" />} Queue
+                  </Button>
+                )}
+              </>
             ) : (
               <Button size="icon" variant="primary" onClick={onSend} disabled={!value.trim() || sending || running} aria-label="Send">
                 {sending ? <Loader2 className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
@@ -279,7 +304,9 @@ function StepLine({ step, folder }: { step: LiveStep; folder: string }) {
 
 const SHOW_LAST = 6;
 
-function AgentTurn({ msg, events, seat, isLast, allowed, onAllow, onAllowAll, onRetry, folder }: {
+function AgentTurn({ msg, events, seat, isLast, allowed, onAllow, onAllowAll, onRetry, folder, steered }: {
+  /** Messages you sent while this answer was running; shown where they arrived. */
+  steered: ChatMessageDTO[];
   folder: string;
   onAllowAll: () => void;
   msg: ChatMessageDTO;
@@ -301,8 +328,12 @@ function AgentTurn({ msg, events, seat, isLast, allowed, onAllow, onAllowAll, on
   // Interim messages tell the story between steps; the final one is shown as the answer below.
   const items = runs.flatMap((r) => r.steps).filter((s) => !(s.kind === 'say' && (s.detail ?? '').trim() === final) && s.kind !== 'note');
   const toolCount = items.filter((s) => s.kind !== 'say').length;
-  const hidden = !showAll && !running && items.length > SHOW_LAST + 2 ? items.length - SHOW_LAST : 0;
-  const shown = hidden ? items.slice(hidden) : items;
+  type Line = { key: string; ts: string; step?: LiveStep; you?: ChatMessageDTO };
+  const lines: Line[] = [...items.map((s) => ({ key: `s${s.id}`, ts: s.ts, step: s })), ...steered.map((m) => ({ key: m.id, ts: m.createdAt, you: m }))].sort((a, b) => a.ts.localeCompare(b.ts));
+  const cut = !showAll && !running && lines.length > SHOW_LAST + 2 ? lines.length - SHOW_LAST : 0;
+  // Your own messages stay visible even when earlier steps are folded away.
+  const shown = cut ? [...lines.slice(0, cut).filter((l) => l.you), ...lines.slice(cut)] : lines;
+  const hidden = cut ? lines.slice(0, cut).filter((l) => !l.you).length : 0;
   const plan = [...runs].reverse().find((r) => r.plan?.length)?.plan ?? null;
   const notes = model.blocks.filter((b) => b.type === 'milestone');
   const who = aiName(msg.runtime, seat);
@@ -332,7 +363,7 @@ function AgentTurn({ msg, events, seat, isLast, allowed, onAllow, onAllowAll, on
         </div>
       ) : null}
 
-      {items.length || running ? (
+      {lines.length || running ? (
         <ol className="mt-2 space-y-0.5 border-l-2 border-seam pl-2.5" aria-label={`What ${who.name} did`}>
           {hidden ? (
             <li>
@@ -341,16 +372,23 @@ function AgentTurn({ msg, events, seat, isLast, allowed, onAllow, onAllowAll, on
               </button>
             </li>
           ) : null}
-          {shown.map((s) =>
-            s.kind === 'say' ? (
-              <li key={s.id} className="px-2 py-1 text-sm leading-6 text-chalk/85">
+          {shown.map(({ key, step: s, you }) =>
+            you ? (
+              <li key={key} className="my-1 flex justify-end">
+                <span className="max-w-[85%] whitespace-pre-wrap rounded-[14px] rounded-br-[4px] bg-hull-3 px-3 py-1.5 text-sm leading-6 text-chalk">
+                  <span className="mr-1.5 text-2xs font-[650] text-dust">You</span>
+                  {you.content}
+                </span>
+              </li>
+            ) : s && s.kind === 'say' ? (
+              <li key={key} className="px-2 py-1 text-sm leading-6 text-chalk/85">
                 {s.detail ?? s.object}
               </li>
-            ) : (
-              <StepLine key={s.id} step={s} folder={folder} />
-            ),
+            ) : s ? (
+              <StepLine key={key} step={s} folder={folder} />
+            ) : null,
           )}
-          {running && !items.length ? (
+          {running && !lines.length ? (
             <li className="flex items-center gap-2 px-2 py-1 text-[13px] text-dust">
               <Loader2 className="size-3.5 animate-spin text-telemetry" aria-hidden /> Getting ready…
             </li>
@@ -418,7 +456,21 @@ function AgentTurn({ msg, events, seat, isLast, allowed, onAllow, onAllowAll, on
   );
 }
 
-function Transcript({ chat, folder, onAllow, onAllowAll, onRetry }: { chat: ConversationDetailDTO; folder: string; onAllow: (c: string) => void; onAllowAll: () => void; onRetry: (q: string) => void }) {
+function Transcript({
+  chat,
+  folder,
+  onAllow,
+  onAllowAll,
+  onRetry,
+  onUnqueue,
+}: {
+  chat: ConversationDetailDTO;
+  folder: string;
+  onAllow: (c: string) => void;
+  onAllowAll: () => void;
+  onRetry: (q: string) => void;
+  onUnqueue: (messageId: string) => void;
+}) {
   const box = useRef<HTMLDivElement>(null);
   const near = useRef(true);
   const byMessage = useMemo(() => {
@@ -427,6 +479,16 @@ function Transcript({ chat, folder, onAllow, onAllowAll, onRetry }: { chat: Conv
     return map;
   }, [chat.events]);
   const lastAgent = [...chat.messages].reverse().find((m) => m.role === 'assistant')?.id;
+  // A message delivered mid-answer belongs inside the answer that was running when you sent it.
+  const steeredBy = useMemo(() => {
+    const map = new Map<string, ChatMessageDTO[]>();
+    let current: string | null = null;
+    for (const m of chat.messages) {
+      if (m.role === 'assistant') current = m.id;
+      else if (m.status === 'steered' && current) map.set(current, [...(map.get(current) ?? []), m]);
+    }
+    return map;
+  }, [chat.messages]);
 
   useEffect(() => {
     const el = box.current;
@@ -444,9 +506,26 @@ function Transcript({ chat, folder, onAllow, onAllowAll, onRetry }: { chat: Conv
     >
       <div className="mx-auto max-w-[760px] space-y-7">
         {chat.messages.map((m, i) =>
-          m.role === 'user' ? (
-            <div key={m.id} className="flex justify-end">
-              <div className="max-w-[85%] whitespace-pre-wrap rounded-[18px] rounded-br-[6px] bg-hull-3 px-4 py-2.5 text-[14.5px] leading-6 text-chalk">{m.content}</div>
+          m.role === 'user' && m.status === 'steered' ? null : m.role === 'user' ? (
+            <div key={m.id} className="flex flex-col items-end gap-1">
+              <div
+                className={cn(
+                  'max-w-[85%] whitespace-pre-wrap rounded-[18px] rounded-br-[6px] px-4 py-2.5 text-[14.5px] leading-6',
+                  m.status === 'queued' ? 'border border-dashed border-seam-2 bg-hull text-chalk/80' : m.status === 'cancelled' ? 'bg-hull-2 text-dust line-through' : 'bg-hull-3 text-chalk',
+                )}
+              >
+                {m.content}
+              </div>
+              {m.status === 'queued' ? (
+                <span className="flex items-center gap-1.5 text-2xs text-dust">
+                  <Clock3 className="size-3" aria-hidden /> Queued, sends when the agent finishes
+                  <button type="button" onClick={() => onUnqueue(m.id)} className="grid size-5 place-items-center rounded-[6px] hover:bg-hull-2 hover:text-chalk" aria-label="Remove this queued message" title="Remove">
+                    <X className="size-3" />
+                  </button>
+                </span>
+              ) : m.status === 'cancelled' && m.error ? (
+                <span className="text-2xs text-dust">{m.error}</span>
+              ) : null}
             </div>
           ) : (
             <AgentTurn
@@ -459,6 +538,7 @@ function Transcript({ chat, folder, onAllow, onAllowAll, onRetry }: { chat: Conv
               onAllow={onAllow}
               onAllowAll={onAllowAll}
               folder={folder}
+              steered={steeredBy.get(m.id) ?? []}
               onRetry={() => {
                 const q = [...chat.messages.slice(0, i)].reverse().find((x) => x.role === 'user');
                 if (q) onRetry(q.content);
@@ -636,7 +716,8 @@ function RunningSession({ repo, tab, sessionId }: { repo: RepoDTO; tab: Workspac
   const [draft, setDraft] = useState('');
   const [showChanges, setShowChanges] = useState(false);
   const invalidate = [keys.chats, keys.chat(sessionId)];
-  const send = useAction((message: string) => post<ConversationDetailDTO>(`/api/chats/${sessionId}/messages`, { message }), { invalidate });
+  const send = useAction((v: { message: string; now?: boolean }) => post<ConversationDetailDTO>(`/api/chats/${sessionId}/messages`, v), { invalidate });
+  const unqueue = useAction((messageId: string) => del<ConversationDetailDTO>(`/api/chats/${sessionId}/messages/${messageId}`), { invalidate });
   const stop = useAction(() => post(`/api/chats/${sessionId}/cancel`), { invalidate });
   const setProvider = useAction((provider: Provider) => patch(`/api/chats/${sessionId}`, { provider }), { invalidate });
   const allow = useAction((command: string) => post<ConversationDetailDTO>(`/api/chats/${sessionId}/allow`, { command }), { invalidate });
@@ -655,7 +736,7 @@ function RunningSession({ repo, tab, sessionId }: { repo: RepoDTO; tab: Workspac
   const editing = c.mode === 'edit';
   const editEvents = c.events.filter((e) => e.kind === 'tool' && (e.data as { step?: string } | null)?.step === 'edit').length;
   const who = c.provider === 'auto' ? 'the agent' : PROVIDER_NAME[c.provider];
-  const submit = (text = draft) => text.trim() && send.mutate(text.trim(), { onSuccess: () => setDraft('') });
+  const submit = (text = draft, now = false) => text.trim() && send.mutate({ message: text.trim(), now }, { onSuccess: () => setDraft('') });
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -711,6 +792,7 @@ function RunningSession({ repo, tab, sessionId }: { repo: RepoDTO; tab: Workspac
           onAllow={(cmd) => allow.mutate(cmd)}
           onAllowAll={() => allowAll.mutate(undefined)}
           onRetry={(q) => submit(q)}
+          onUnqueue={(id) => unqueue.mutate(id)}
         />
         <div className="border-t border-seam bg-hull px-5 py-3 sm:px-8">
           <div className="mx-auto max-w-[760px]">
@@ -719,9 +801,19 @@ function RunningSession({ repo, tab, sessionId }: { repo: RepoDTO; tab: Workspac
               onChange={setDraft}
               onSend={() => submit()}
               onStop={() => stop.mutate(undefined)}
+              onSendNow={() => submit(draft, true)}
+              steerable={c.steerable}
               running={running}
               sending={send.isPending || allow.isPending || allowAll.isPending}
-              placeholder={running ? `${who === 'the agent' ? 'The agent' : who} is working. You can stop it, or wait to send the next message.` : editing ? 'What next?' : 'Ask a follow-up…'}
+              placeholder={
+                running
+                  ? c.steerable
+                    ? `Type a follow-up. ${who === 'the agent' ? 'The agent' : who} reads it at its next step, without stopping.`
+                    : `Type a follow-up. It is sent when ${who} finishes, or click Send now to interrupt.`
+                  : editing
+                    ? 'What next?'
+                    : 'Ask a follow-up…'
+              }
               repoId={repo.id}
             />
           </div>

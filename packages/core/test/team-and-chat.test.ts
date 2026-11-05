@@ -174,16 +174,93 @@ describe('Ask conversations', () => {
     expect(orbit.chat.detail(c.id).messages.at(-1)).toMatchObject({ status: 'failed', error: expect.stringMatching(/usage limit/) });
   });
 
-  it('refuses a second question while one is being answered, and rejects empty ones', async () => {
+  it('queues follow-ups sent while the agent works and sends them together when it finishes', async () => {
+    const calls: AgentRunRequest[] = [];
     let release!: () => void;
-    const gate = new Promise<void>((r) => (release = r));
-    const slow: AgentRuntime = { ...fake('claude-code-cli'), run: async () => (await gate, emptyResult({ status: 'succeeded', durationMs: 1, text: 'ok' })) };
+    let gate = new Promise<void>((r) => (release = r));
+    const slow: AgentRuntime = {
+      ...fake('claude-code-cli'),
+      run: async (req, ctx) => {
+        calls.push(req);
+        if (calls.length === 1) await gate;
+        void ctx;
+        return emptyResult({ status: 'succeeded', durationMs: 1, text: `answer ${calls.length}`, sessionId: 's1', numTurns: 1 });
+      },
+    };
     await setup([slow]);
     const c = orbit.chat.start({ message: 'One' });
-    expect(() => orbit.chat.send(c.id, { message: 'Two' })).toThrow(/still working/);
     expect(() => orbit.chat.send(c.id, { message: '   ' })).toThrow();
+    orbit.chat.send(c.id, { message: 'Two' });
+    const three = orbit.chat.send(c.id, { message: 'Three' });
+    expect(three.messages.filter((m) => m.status === 'queued').map((m) => m.content)).toEqual(['Two', 'Three']);
+    // Take one back before it is sent.
+    const dropped = three.messages.find((m) => m.content === 'Three')!;
+    orbit.chat.unqueue(c.id, dropped.id);
+    orbit.chat.send(c.id, { message: 'Four' });
+    release();
+    await until(() => calls.length === 2 && !orbit.chat.isRunning(c.id));
+    expect(calls[1]?.prompt).toBe('Two\n\nFour');
+    const d = orbit.chat.detail(c.id);
+    expect(d.messages.map((m) => [m.role, m.content, m.status])).toEqual([
+      ['user', 'One', 'done'],
+      ['assistant', 'answer 1', 'done'],
+      ['user', 'Two', 'done'],
+      ['user', 'Four', 'done'],
+      ['assistant', 'answer 2', 'done'],
+    ]);
+    gate = Promise.resolve();
+  });
+
+  it('delivers a message mid-answer when the agent can take it, like typing into Claude Code', async () => {
+    const received: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let runs = 0;
+    const live: AgentRuntime = {
+      ...fake('claude-code-cli'),
+      run: async (req, ctx) => {
+        runs++;
+        received.push(req.prompt);
+        ctx.onSteerReady?.((text) => (received.push(text), true));
+        await gate;
+        ctx.onSteerReady?.(null);
+        return emptyResult({ status: 'succeeded', durationMs: 1, text: 'done with both', numTurns: 1 });
+      },
+    };
+    await setup([live]);
+    const c = orbit.chat.start({ message: 'Long task' });
+    await until(() => orbit.chat.detail(c.id).steerable);
+    const d = orbit.chat.send(c.id, { message: 'Also check the tests' });
+    expect(d.messages.at(-1)).toMatchObject({ role: 'user', content: 'Also check the tests', status: 'steered' });
     release();
     await until(() => !orbit.chat.isRunning(c.id));
+    expect(received).toHaveLength(2);
+    expect(received[0]).toContain('Long task');
+    expect(received[1]).toBe('Also check the tests');
+    expect(runs).toBe(1);
+    const after = orbit.chat.detail(c.id);
+    expect(after.steerable).toBe(false);
+    expect(after.messages.map((m) => m.status)).toEqual(['done', 'done', 'steered']);
+  });
+
+  it('"send now" interrupts the current answer and sends the new message right away', async () => {
+    const calls: AgentRunRequest[] = [];
+    const slow: AgentRuntime = {
+      ...fake('claude-code-cli'),
+      run: (req, ctx) => {
+        calls.push(req);
+        if (calls.length > 1) return Promise.resolve(emptyResult({ status: 'succeeded', durationMs: 1, text: 'redirected', numTurns: 1 }));
+        return new Promise((resolve) => ctx.signal.addEventListener('abort', () => resolve(emptyResult({ status: 'cancelled', durationMs: 1, text: 'partial' }))));
+      },
+    };
+    await setup([slow]);
+    const c = orbit.chat.start({ message: 'Long task' });
+    await until(() => calls.length === 1);
+    orbit.chat.send(c.id, { message: 'Actually, do this instead', now: true });
+    await until(() => calls.length === 2 && !orbit.chat.isRunning(c.id));
+    const d = orbit.chat.detail(c.id);
+    expect(d.messages.map((m) => m.status)).toEqual(['done', 'cancelled', 'done', 'done']);
+    expect(d.messages.at(-1)?.content).toBe('redirected');
   });
 });
 

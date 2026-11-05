@@ -80,7 +80,8 @@ export class ClaudeCodeCliRuntime implements AgentRuntime {
     return { available: true, reason: null, sandbox: process.platform === 'darwin' ? 'available' : 'unknown', details };
   }
 
-  buildArgs(req: AgentRunRequest): string[] {
+  /** `live`: keep the input open (stream-json) so messages can be added while the agent works. */
+  buildArgs(req: AgentRunRequest, live = false): string[] {
     const tools: string[] = req.access === 'workspace-write' ? [...ENGINEER_TOOLS] : [...READ_ONLY_TOOLS];
     if (req.execution.allowNetworkTools) tools.push('WebFetch', 'WebSearch');
     // Working sessions never pre-approve the shell tools as a whole. "Ask first" (dontAsk):
@@ -98,7 +99,7 @@ export class ClaudeCodeCliRuntime implements AgentRuntime {
       'stream-json',
       '--verbose',
       '--input-format',
-      'text',
+      live ? 'stream-json' : 'text',
       // Missions: --restricted ignores every settings file. Working sessions: the developer's own
       // user settings and skills load (as in their terminal), project and local files still do not.
       ...(req.userEnvironment ? ['--setting-sources', 'user'] : ['--restricted']),
@@ -146,15 +147,17 @@ export class ClaudeCodeCliRuntime implements AgentRuntime {
     const stderr: string[] = [];
     let text = '';
     let resultMsg: Record<string, unknown> | null = null;
+    let closeInput: () => void = () => undefined;
     const calls: ToolCallLog = new Map();
     let model: string | null = req.model;
 
     try {
-      const sub = execa(this.bin, this.buildArgs(req), {
+      const live = !!ctx.onSteerReady;
+      const sub = execa(this.bin, this.buildArgs(req, live), {
         cwd: req.cwd,
         env: buildAgentEnv(this.env),
         extendEnv: false,
-        input: req.prompt,
+        ...(live ? { stdin: 'pipe' as const } : { input: req.prompt }),
         reject: false,
         windowsHide: true,
         cancelSignal: controller.signal,
@@ -167,6 +170,24 @@ export class ClaudeCodeCliRuntime implements AgentRuntime {
         stderr.push(d.toString());
         if (stderr.length > 60) stderr.shift();
       });
+      // Live input: the prompt is the first message; later ones arrive while the agent works and
+      // Claude Code folds them in at its next step, as when you type into its terminal.
+      let inputOpen = live && !!sub.stdin;
+      const writeMessage = (text: string): boolean => {
+        if (!inputOpen || !sub.stdin || sub.stdin.destroyed) return false;
+        sub.stdin.write(`${JSON.stringify({ type: 'user', message: { role: 'user', content: text } })}\n`);
+        return true;
+      };
+      closeInput = () => {
+        if (!inputOpen) return;
+        inputOpen = false;
+        ctx.onSteerReady?.(null);
+        sub.stdin?.end();
+      };
+      if (live) {
+        writeMessage(req.prompt);
+        ctx.onSteerReady?.(writeMessage);
+      }
       if (sub.stdout) {
         const rl = createInterface({ input: sub.stdout });
         for await (const line of rl) {
@@ -188,6 +209,8 @@ export class ClaudeCodeCliRuntime implements AgentRuntime {
             emitToolResults((msg.message as { content?: unknown } | undefined)?.content, ctx.onEvent, { detectDenied: true, calls });
           } else if (type === 'result') {
             resultMsg = msg;
+            // The answer is done: stop taking messages so the process can exit.
+            closeInput();
           }
         }
       }
@@ -200,6 +223,7 @@ export class ClaudeCodeCliRuntime implements AgentRuntime {
         error: redactSecrets(`${(err as Error).message}\n${stderr.join('').slice(-1500)}`),
       });
     } finally {
+      closeInput();
       clearTimeout(timer);
       ctx.signal.removeEventListener('abort', onAbort);
     }

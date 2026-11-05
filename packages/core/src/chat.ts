@@ -10,6 +10,7 @@ import {
   sessionPrompt,
   type AgentRunRequest,
   type AgentRunResult,
+  type SteerFn,
   type AssistantProject,
 } from '@orbit/agents';
 import { asc, desc, eq, inArray, conversationEvents, conversationMessages, conversations, type ConversationMessageRow, type ConversationRow } from '@orbit/database';
@@ -66,6 +67,8 @@ export interface StartSessionInput {
  */
 export class ChatService {
   private readonly running = new Map<string, AbortController>();
+  /** For agents that take messages mid-answer: delivers one right away. */
+  private readonly steers = new Map<string, SteerFn>();
 
   constructor(
     private readonly ctx: OrbitContext,
@@ -117,12 +120,41 @@ export class ChatService {
   }
 
   /** Adds a message to a session and starts the agent on it. */
-  send(id: string, input: { message: string; provider?: Provider; mode?: SessionMode; repoIds?: string[]; permissionMode?: SessionPermissionMode }): ConversationDetailDTO {
+  /**
+   * Adds a message. While the agent is still answering, the message is queued, as in
+   * Claude Code, and goes out as soon as the current answer ends; `now` interrupts the
+   * current answer so it goes out right away.
+   */
+  send(id: string, input: { message: string; provider?: Provider; mode?: SessionMode; repoIds?: string[]; permissionMode?: SessionPermissionMode; now?: boolean }): ConversationDetailDTO {
     this.row(id);
-    if (this.running.has(id)) throw new OrbitError('CONFLICT', 'The agent is still working on the previous message.', { hint: 'Wait for it to finish or stop it first.' });
     const message = this.clean(input.message);
     this.update(id, input);
+    if (this.running.has(id)) {
+      const ts = nowIso(this.ctx);
+      // Delivered right away when the agent can take it, like typing into Claude Code while it works.
+      const steer = input.now ? undefined : this.steers.get(id);
+      if (steer && steer(message)) {
+        this.ctx.db.insert(conversationMessages).values({ id: newId('msg'), conversationId: id, role: 'user', content: message, status: 'steered', createdAt: ts, finishedAt: ts }).run();
+        this.touch(id);
+        return this.detail(id);
+      }
+      this.ctx.db.insert(conversationMessages).values({ id: newId('msg'), conversationId: id, role: 'user', content: message, status: 'queued', createdAt: ts }).run();
+      this.touch(id);
+      if (input.now) this.running.get(id)?.abort();
+      return this.detail(id);
+    }
     this.ask(id, message);
+    return this.detail(id);
+  }
+
+  /** Takes back a queued message before it is sent. */
+  unqueue(id: string, messageId: string): ConversationDetailDTO {
+    this.row(id);
+    const msg = this.ctx.db.select().from(conversationMessages).where(eq(conversationMessages.id, messageId)).get();
+    if (!msg || msg.conversationId !== id) throw new OrbitError('NOT_FOUND', 'Message not found.');
+    if (msg.status !== 'queued') throw new OrbitError('CONFLICT', 'This message has already been sent.');
+    this.ctx.db.delete(conversationMessages).where(eq(conversationMessages.id, messageId)).run();
+    this.touch(id);
     return this.detail(id);
   }
 
@@ -207,6 +239,10 @@ export class ChatService {
     for (const m of stuck) {
       this.ctx.db.update(conversationMessages).set({ status: 'failed', error: 'Interrupted by an Orbit restart. Send the message again to continue.', finishedAt: ts }).where(eq(conversationMessages.id, m.id)).run();
     }
+    const unsent = this.ctx.db.select().from(conversationMessages).where(eq(conversationMessages.status, 'queued')).all();
+    for (const m of unsent) {
+      this.ctx.db.update(conversationMessages).set({ status: 'cancelled', error: 'Not sent: Orbit restarted before it could go out.', finishedAt: ts }).where(eq(conversationMessages.id, m.id)).run();
+    }
     return stuck.length;
   }
 
@@ -233,26 +269,39 @@ export class ChatService {
   /** Stores the visible message and starts the agent on it (`prompt` overrides what the agent receives). */
   private ask(conversationId: string, message: string, prompt?: string): void {
     const ts = nowIso(this.ctx);
-    this.ctx.db.insert(conversationMessages).values({ id: newId('msg'), conversationId, role: 'user', content: message, status: 'done', createdAt: ts, finishedAt: ts }).run();
+    const userId = newId('msg');
+    this.ctx.db.insert(conversationMessages).values({ id: userId, conversationId, role: 'user', content: message, status: 'done', createdAt: ts, finishedAt: ts }).run();
+    this.startTurn(conversationId, prompt ?? message, [userId]);
+  }
+
+  /** Runs the agent on `text`; `userIds` are the messages it answers (left out of the history). */
+  private startTurn(conversationId: string, text: string, userIds: string[]): void {
     const answerId = newId('msg');
     this.ctx.db.insert(conversationMessages).values({ id: answerId, conversationId, role: 'assistant', content: '', status: 'running', createdAt: nowIso(this.ctx) }).run();
     this.touch(conversationId);
     const controller = new AbortController();
     this.running.set(conversationId, controller);
-    void this.answer(conversationId, answerId, message, controller.signal, prompt)
+    void this.answer(conversationId, answerId, text, controller.signal, userIds)
       .catch((err: Error) => {
         this.finish(answerId, { status: 'failed', error: redactSecrets(err.message) });
       })
       .finally(() => {
         this.running.delete(conversationId);
-        this.touch(conversationId);
         const conv = this.ctx.db.select().from(conversations).where(eq(conversations.id, conversationId)).get();
         if (conv?.mode === 'edit') for (const repoId of conv.repoIds) this.ctx.bus.publish({ type: 'repo.changed', repoId });
+        // Messages sent while the agent was busy go out now, together, as the next turn.
+        const queued = conv ? this.messages(conversationId).filter((m) => m.role === 'user' && m.status === 'queued') : [];
+        if (queued.length) {
+          const ts = nowIso(this.ctx);
+          for (const m of queued) this.ctx.db.update(conversationMessages).set({ status: 'done', finishedAt: ts }).where(eq(conversationMessages.id, m.id)).run();
+          this.startTurn(conversationId, queued.map((m) => m.content).join('\n\n'), queued.map((m) => m.id));
+          return;
+        }
+        this.touch(conversationId);
       });
   }
 
-  private async answer(conversationId: string, messageId: string, visible: string, signal: AbortSignal, prompt?: string): Promise<void> {
-    const message = prompt ?? visible;
+  private async answer(conversationId: string, messageId: string, message: string, signal: AbortSignal, userIds: string[]): Promise<void> {
     const conv = this.row(conversationId);
     const projects = this.projectsFor(conv.repoIds);
     if (!projects.length) {
@@ -267,11 +316,10 @@ export class ChatService {
       });
       return;
     }
+    // The messages being answered travel in the prompt itself, not in the history.
     const history = this.messages(conversationId)
-      .filter((m) => m.status === 'done' && m.id !== messageId)
+      .filter((m) => (m.status === 'done' || m.status === 'steered') && m.id !== messageId && !userIds.includes(m.id))
       .map((m) => ({ role: m.role, content: m.content }));
-    // The message just stored is the last history entry; the prompt carries it separately.
-    if (history.at(-1)?.role === 'user' && history.at(-1)?.content === visible) history.pop();
 
     let result = await this.turn(conv, messageId, plan.primary, projects, message, history, signal);
     if (result.status === 'rate_limited' && plan.fallback) {
@@ -408,7 +456,16 @@ export class ChatService {
       title: `${who} ${resumeId ? 'continued' : 'started'} (${seat.label}${seat.model ? ` · ${seat.model}` : ''})`,
       data: { runId, phase: 'start', runtime: seat.runtime.id, provider: seat.provider, model: seat.model },
     });
-    const result = await seat.runtime.run(request, { signal, onEvent: (e) => this.event(conv.id, messageId, { ...agentEventRecord(e, runId), actor: 'assistant' }) });
+    const result = await seat.runtime.run(request, {
+      signal,
+      onEvent: (e) => this.event(conv.id, messageId, { ...agentEventRecord(e, runId), actor: 'assistant' }),
+      onSteerReady: (fn) => {
+        if (fn) this.steers.set(conv.id, fn);
+        else this.steers.delete(conv.id);
+        this.ctx.bus.publish({ type: 'chat.updated', conversationId: conv.id });
+      },
+    });
+    this.steers.delete(conv.id);
     if (result.status === 'rate_limited' || result.status === 'failed') {
       forgetResolvedRuntime(this.ctx);
       forgetCodexAvailability(this.ctx);
@@ -541,6 +598,7 @@ export class ChatService {
       lastMessage: last ? truncate(last.content.replace(/\s+/g, ' '), 140) : null,
       running,
       lastStatus: lastAgent?.status ?? null,
+      steerable: this.steers.has(row.id),
       needsYou: !running && !!lastAgent?.blocked?.some((b) => b.allowable && !row.allowedCommands.includes(b.command)),
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,

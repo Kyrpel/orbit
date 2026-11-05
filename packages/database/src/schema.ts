@@ -409,7 +409,7 @@ export const conversationMessages = sqliteTable(
       .references(() => conversations.id, { onDelete: 'cascade' }),
     role: text('role').$type<'user' | 'assistant'>().notNull(),
     content: text('content').notNull(),
-    status: text('status').$type<'running' | 'done' | 'failed' | 'cancelled'>().notNull(),
+    status: text('status').$type<'running' | 'done' | 'failed' | 'cancelled' | 'queued' | 'steered'>().notNull(),
     runtime: text('runtime'),
     model: text('model'),
     error: text('error'),

@@ -163,9 +163,18 @@ export interface RuntimeAvailability {
   details: Record<string, string>;
 }
 
+/** Delivers a message to the agent while it is working; false when it can no longer take one. */
+export type SteerFn = (text: string) => boolean;
+
 export interface AgentRunContext {
   signal: AbortSignal;
   onEvent: (event: AgentEvent) => void;
+  /**
+   * Set by callers that want to talk to the agent mid-answer, like typing into Claude Code
+   * while it works. A runtime that supports it calls this with a function once it can take
+   * messages, and with null when it no longer can (the answer is finishing).
+   */
+  onSteerReady?: (steer: SteerFn | null) => void;
 }
 
 /** A pluggable agent backend. Orbit ships Claude Agent SDK, Claude Code CLI, Codex CLI and a scripted test runtime. */

@@ -538,7 +538,12 @@ export interface MissionSuggestion {
   repoIds: string[];
 }
 
-export type ChatMessageStatus = 'running' | 'done' | 'failed' | 'cancelled';
+/**
+ * `steered`: you sent it while the agent was working and it was delivered right away; the
+ * agent took it in at its next step (like typing into Claude Code while it works).
+ * `queued`: the agent could not take it mid-answer, so it goes out when the answer ends.
+ */
+export type ChatMessageStatus = 'running' | 'done' | 'failed' | 'cancelled' | 'queued' | 'steered';
 
 export interface ChatMessageDTO {
   id: string;
@@ -611,6 +616,8 @@ export interface ConversationSummaryDTO {
   lastStatus: ChatMessageStatus | null;
   /** The agent is waiting for your OK on a command. */
   needsYou: boolean;
+  /** The agent is working and takes new messages right away (otherwise they are queued). */
+  steerable: boolean;
   createdAt: string;
   updatedAt: string;
 }

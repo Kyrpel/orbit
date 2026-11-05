@@ -75,6 +75,8 @@ const schemas = {
     mode: z.enum(['edit', 'ask']).optional(),
     provider: z.enum(['auto', 'claude', 'codex']).optional(),
     permissionMode: z.enum(['ask', 'auto']).optional(),
+    /** While the agent is busy: interrupt it and send this right away (otherwise it is queued). */
+    now: z.boolean().optional(),
   }),
   patchChat: z.object({
     provider: z.enum(['auto', 'claude', 'codex']).optional(),
@@ -185,6 +187,10 @@ export async function buildApp(orbit: Orbit, opts: AppOptions): Promise<FastifyI
   app.patch('/api/chats/:id', async (req) => orbit.chat.update((req.params as { id: string }).id, body(schemas.patchChat, req)));
   app.post('/api/chats/:id/allow', async (req) => orbit.chat.allow((req.params as { id: string }).id, body(schemas.allowCommand, req).command));
   app.post('/api/chats/:id/allow-all', async (req) => orbit.chat.allowAll((req.params as { id: string }).id));
+  app.delete('/api/chats/:id/messages/:messageId', async (req) => {
+    const p = req.params as { id: string; messageId: string };
+    return orbit.chat.unqueue(p.id, p.messageId);
+  });
 
   // Workspace: a project's uncommitted changes, and committing them.
   app.get('/api/repos/:id/changes', async (req) => orbit.changes((req.params as { id: string }).id));
