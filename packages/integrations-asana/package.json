@@ -1,0 +1,11 @@
+{
+  "name": "@orbit/integrations-asana",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": { "@orbit/integrations": "workspace:*", "@orbit/shared": "workspace:*" },
+  "devDependencies": {}
+}

@@ -1,0 +1,138 @@
+@import 'tailwindcss';
+@import '@fontsource-variable/recursive/full.css';
+
+/*
+  Orbit design tokens: a calm white workbench.
+  The token names are kept from the first (dark) theme; the values are light now.
+  Night = the soft frame around work, Hull = white work surfaces, Seam = hairlines,
+  Chalk/Dust = ink and its quieter tones.
+  Colour carries meaning, never decoration:
+    Signal (amber) = you: your actions and anything waiting for your OK.
+    Telemetry (teal) = an AI is working.  Go = done.  Fault = a problem.
+    Claude (copper) and Codex (blue) say which AI is doing the work.
+*/
+@theme {
+  --color-night: #f4f5f7;
+  --color-hull: #ffffff;
+  --color-hull-2: #f1f3f6;
+  --color-hull-3: #e8ebf0;
+  --color-seam: #e3e6eb;
+  --color-seam-2: #cdd2da;
+  --color-chalk: #1c2333;
+  --color-dust: #5d6677;
+  --color-dust-2: #8c94a3;
+  --color-signal: #f3ae3d;
+  --color-signal-ink: #3a2600;
+  --color-signal-deep: #8f5608;
+  --color-telemetry: #0b7c71;
+  --color-go: #17834a;
+  --color-fault: #c93636;
+  /* AI providers: who is doing the work, at a glance. */
+  --color-claude: #b65e26;
+  --color-codex: #2e62cf;
+
+  --font-sans: 'Recursive Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'Recursive Variable', ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+
+  --text-2xs: 0.75rem;
+  --text-2xs--line-height: 1.1rem;
+  --text-xs: 0.8125rem;
+  --text-xs--line-height: 1.2rem;
+  --text-sm: 0.875rem;
+  --text-sm--line-height: 1.35rem;
+  --text-base: 0.9375rem;
+  --text-base--line-height: 1.5rem;
+  --text-lg: 1.125rem;
+  --text-lg--line-height: 1.6rem;
+  --text-xl: 1.375rem;
+  --text-xl--line-height: 1.8rem;
+  --text-2xl: 1.75rem;
+  --text-2xl--line-height: 2.15rem;
+
+  --radius-panel: 12px;
+  --radius-control: 8px;
+
+  --animate-beacon: beacon 2.4s ease-out infinite;
+  @keyframes beacon {
+    0% {
+      box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 55%, transparent);
+    }
+    70% {
+      box-shadow: 0 0 0 10px color-mix(in oklab, currentColor 0%, transparent);
+    }
+    100% {
+      box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 0%, transparent);
+    }
+  }
+}
+
+@layer base {
+  html {
+    background: var(--color-night);
+    color: var(--color-chalk);
+    font-family: var(--font-sans);
+    font-variation-settings: 'MONO' 0, 'CASL' 0;
+    color-scheme: light;
+    font-size: 15px;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    min-height: 100vh;
+    font-feature-settings: 'ss01', 'ss05';
+  }
+  h1,
+  h2,
+  h3 {
+    letter-spacing: -0.012em;
+    font-weight: 620;
+  }
+  /* Big headings use Recursive's casual axis: the friendly, hand-drawn voice. */
+  h1 {
+    font-variation-settings: 'MONO' 0, 'CASL' 0.9;
+    letter-spacing: -0.02em;
+    font-weight: 680;
+  }
+  ::selection {
+    background: color-mix(in oklab, var(--color-telemetry) 22%, transparent);
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-telemetry);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+  a {
+    color: inherit;
+  }
+  * {
+    scrollbar-color: var(--color-seam-2) transparent;
+    scrollbar-width: thin;
+  }
+}
+
+@utility mono {
+  font-family: var(--font-mono);
+  font-variation-settings: 'MONO' 1, 'CASL' 0;
+  font-feature-settings: normal;
+  letter-spacing: 0;
+}
+
+/* The friendly display voice for headlines outside h1 (empty states, welcome). */
+@utility casual {
+  font-variation-settings: 'MONO' 0, 'CASL' 0.9;
+  letter-spacing: -0.02em;
+}
+
+@utility tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

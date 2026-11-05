@@ -1,0 +1,32 @@
+# Changelog
+
+All notable changes to Orbit are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [Unreleased]
+
+### Added
+
+- Mission engine with an explicit state machine, durable SQLite job queue, restart recovery and an idempotent outbox for pushes, pull requests and task comments.
+- Planner, engineer and reviewer roles with structured outputs; automatic fix passes on failing checks or blocking review findings.
+- Runtimes: Claude Agent SDK, Claude Code CLI (headless) and a scripted demo runtime.
+- Isolated git worktrees per mission; setup artifacts kept out of the change; secret scanning before commit and publish.
+- Repository routing: project mapping, repository summaries, keyword evidence and planner proposals with explicit scope approval.
+- Asana: personal access token connection, project mapping, `/orbit run|cancel|status` comments through the Events API, reconciliation, progress comments, "Run ready tasks".
+- Dashboard: Today, Missions with live trajectory and timeline, diff viewer, checks, review findings, approval rail, Projects, Agents, Activity, Integrations, Settings and a setup wizard.
+- CLI `orbit` and an MCP server for Claude Code.
+- Mission receipts with a privacy-safe share version and image card.
+- Automatic runtime (default): your Claude Code plan when available, otherwise an API key.
+- Per-role reasoning effort (low to max); the engineer defaults to Extra high.
+- Blocked missions name their cause and offer a one-click fix ("Allow and retry"); scope approval warns about required machine permissions up front.
+- Live tab on missions: what each agent is doing right now, step by step, with its to-do list, failed steps and your checks.
+- Codex CLI runtime (`codex exec --json`, your ChatGPT login), always sandboxed: read-only for planning, review and Ask; workspace-write without network for the engineer.
+- AI team orchestrator: Planner, Engineer, Reviewer and Assistant each pick Claude or Codex (or Auto). Auto has a different AI review the engineer's work, and steps switch to the other AI when one is not ready or hits its usage limit.
+- Ask: chat with the Assistant about any or all of your projects. It reads the code (never writes), shows the files it looked at, and can turn an answer into a mission in one click. Quick-ask box on Today.
+- Configurable worktree folder (`execution.worktreeRoot`), with a one-click fix on Windows where Codex cannot run Node inside the user folder.
+- Workspace (new home screen): pick any project and work with Claude or Codex directly in it, several projects at once in tabs with live status lights (working, needs your OK, finished). Agents edit the real files, keep their session between messages, and ask before running commands (Allow and continue). Each tab picks its AI; a Changes panel shows the diff with Commit and Check security.
+- Working sessions load your own Claude Code user settings and skills (design skills included) while still ignoring settings files inside projects; the session agent is told to use the design skill that fits each project.
+- Security reviewer: a sixth agent that checks every Autopilot change (critical and high findings go back to the engineer) and your workspace changes on request.
+- Prompt engineer: rewrites rough Asana tasks into clear ones with acceptance criteria (review, edit, then Update in Asana) and improves requests in the workspace (Improve).
+- Settings shows all your agents and the AI each one uses. Missions are now called Autopilot tasks in the interface.
+- New light, friendlier interface: white work surfaces, a top bar, plain language, and colour with meaning (amber for you, teal for an AI at work).
+- Single-project choice by default when starting a mission; changes spanning several projects are an explicit opt-in.

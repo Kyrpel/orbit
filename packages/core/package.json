@@ -1,0 +1,19 @@
+{
+  "name": "@orbit/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@orbit/agents": "workspace:*",
+    "@orbit/database": "workspace:*",
+    "@orbit/git": "workspace:*",
+    "@orbit/integrations": "workspace:*",
+    "@orbit/integrations-asana": "workspace:*",
+    "@orbit/shared": "workspace:*",
+    "zod": "^4.3.4"
+  },
+  "devDependencies": {}
+}

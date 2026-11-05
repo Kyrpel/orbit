@@ -1,0 +1,37 @@
+{
+  "name": "orbit-monorepo",
+  "private": true,
+  "type": "module",
+  "description": "Orbit: turn a task into a reviewed pull request. Your projects, your AI team.",
+  "packageManager": "pnpm@10.34.9",
+  "engines": {
+    "node": ">=22.11"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "orbit": "tsx packages/cli/src/index.ts",
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json && tsc -p apps/web/tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "check": "tsc -p tsconfig.json && tsc -p apps/web/tsconfig.json && vitest run",
+    "demo:repo": "node scripts/create-demo-repo.mjs"
+  },
+  "devDependencies": {
+    "@orbit/agents": "workspace:*",
+    "@orbit/core": "workspace:*",
+    "@orbit/server": "workspace:*",
+    "@playwright/test": "1.64.1",
+    "@types/node": "^22.20.5",
+    "tsx": "^4.23.15",
+    "typescript": "~5.9.3",
+    "vitest": "^3.2.7"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "esbuild"
+    ]
+  }
+}

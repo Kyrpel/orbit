@@ -1,0 +1,34 @@
+import { KNOWN_MODELS } from '@orbit/shared';
+import { cn } from '../lib/utils';
+
+export type ProviderKey = 'claude' | 'codex' | 'scripted' | null | undefined;
+
+export const PROVIDER_NAME: Record<string, string> = { claude: 'Claude', codex: 'Codex', scripted: 'Scripted' };
+export const PROVIDER_TEXT: Record<string, string> = { claude: 'text-claude', codex: 'text-codex', scripted: 'text-dust' };
+
+export function providerOfRuntime(runtime: string | null | undefined): ProviderKey {
+  if (!runtime) return null;
+  if (runtime === 'codex-cli') return 'codex';
+  if (runtime === 'scripted') return 'scripted';
+  return 'claude';
+}
+
+/** "Claude Sonnet 5.5" for known Claude ids, the raw id otherwise. */
+export function modelLabel(model: string | null | undefined): string | null {
+  if (!model) return null;
+  return KNOWN_MODELS.find((m) => m.id === model)?.label ?? model;
+}
+
+/** A small "who is working" chip: provider colour dot, name, and the model if known. */
+export function ProviderBadge({ provider, model, className, quiet }: { provider: ProviderKey; model?: string | null; className?: string; quiet?: boolean }) {
+  if (!provider) return null;
+  const name = PROVIDER_NAME[provider] ?? provider;
+  const label = modelLabel(model);
+  return (
+    <span className={cn('inline-flex min-w-0 items-center gap-1.5 text-2xs', quiet ? 'text-dust' : 'text-chalk/85', className)}>
+      <span className={cn('size-1.5 shrink-0 rounded-full bg-current', PROVIDER_TEXT[provider])} aria-hidden />
+      <span className={cn('font-[600]', PROVIDER_TEXT[provider])}>{name}</span>
+      {label && label !== name ? <span className="truncate text-dust">{label.replace(/^Claude /, '')}</span> : null}
+    </span>
+  );
+}
