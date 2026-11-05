@@ -40,6 +40,10 @@ import { repoChanges } from './workspace';
 
 const MAX_MESSAGE = 20_000;
 const ASK_MAX_TURNS = 40;
+/** Effectively no limit for working sessions: a safety net for a process that hangs for a day. */
+const SESSION_TIMEOUT_MS = 24 * 60 * 60_000;
+/** Long jobs (a batch, a big refactor) take many steps; Claude Code itself has no step limit. */
+const SESSION_MAX_TURNS = 2000;
 
 type Provider = ConversationSummaryDTO['provider'];
 
@@ -50,6 +54,7 @@ export interface StartSessionInput {
   mode?: SessionMode;
   provider?: Provider;
   permissionMode?: SessionPermissionMode;
+  model?: string | null;
 }
 
 /**
@@ -110,6 +115,7 @@ export class ChatService {
         mode,
         provider: input.provider ?? 'auto',
         permissionMode: input.permissionMode ?? this.ctx.settings.get().execution.sessionCommands,
+        model: cleanModel(input.model),
         allowedCommands: [],
         createdAt: ts,
         updatedAt: ts,
@@ -125,7 +131,7 @@ export class ChatService {
    * Claude Code, and goes out as soon as the current answer ends; `now` interrupts the
    * current answer so it goes out right away.
    */
-  send(id: string, input: { message: string; provider?: Provider; mode?: SessionMode; repoIds?: string[]; permissionMode?: SessionPermissionMode; now?: boolean }): ConversationDetailDTO {
+  send(id: string, input: { message: string; provider?: Provider; mode?: SessionMode; repoIds?: string[]; permissionMode?: SessionPermissionMode; model?: string | null; now?: boolean }): ConversationDetailDTO {
     this.row(id);
     const message = this.clean(input.message);
     this.update(id, input);
@@ -159,7 +165,7 @@ export class ChatService {
   }
 
   /** Changes a session's AI, mode or projects; the next message uses them. */
-  update(id: string, patch: { provider?: Provider; mode?: SessionMode; repoIds?: string[]; title?: string; permissionMode?: SessionPermissionMode }): ConversationSummaryDTO {
+  update(id: string, patch: { provider?: Provider; mode?: SessionMode; repoIds?: string[]; title?: string; permissionMode?: SessionPermissionMode; model?: string | null }): ConversationSummaryDTO {
     const row = this.row(id);
     const set: Partial<ConversationRow> = {};
     const repoIds = patch.repoIds ? this.validRepoIds(patch.repoIds) : row.repoIds;
@@ -167,6 +173,7 @@ export class ChatService {
     if (patch.provider && patch.provider !== row.provider) set.provider = patch.provider;
     if (patch.mode && patch.mode !== row.mode) set.mode = this.allowedMode(patch.mode, repoIds);
     if (patch.title?.trim()) set.title = truncate(patch.title.trim(), 120);
+    if (patch.model !== undefined && cleanModel(patch.model) !== row.model) set.model = cleanModel(patch.model);
     if (patch.permissionMode && patch.permissionMode !== row.permissionMode) {
       set.permissionMode = patch.permissionMode;
       audit(this.ctx, { actor: 'user', action: 'session.permission_mode', target: id, summary: `Commands in a working session: ${patch.permissionMode === 'auto' ? 'auto (safety-checked)' : 'ask first'}` });
@@ -321,10 +328,10 @@ export class ChatService {
       .filter((m) => (m.status === 'done' || m.status === 'steered') && m.id !== messageId && !userIds.includes(m.id))
       .map((m) => ({ role: m.role, content: m.content }));
 
-    let result = await this.turn(conv, messageId, plan.primary, projects, message, history, signal);
+    let result = await this.turn(conv, messageId, withModel(plan.primary, conv.model), projects, message, history, signal);
     if (result.status === 'rate_limited' && plan.fallback) {
       this.event(conversationId, messageId, { kind: 'note', actor: 'system', title: `${plan.primary.label} hit its usage limit. Switching to ${plan.fallback.label}.`, detail: result.error, data: null });
-      result = await this.turn(this.row(conversationId), messageId, plan.fallback, projects, message, history, signal);
+      result = await this.turn(this.row(conversationId), messageId, withModel(plan.fallback, conv.model), projects, message, history, signal);
     }
 
     const blocked = this.blockedFrom(result, this.row(conversationId));
@@ -400,8 +407,10 @@ export class ChatService {
     const base = {
       role: 'assistant' as AgentRunRequest['role'],
       cwd: primary!.localPath,
-      timeoutMs: settings.execution.agentTimeoutMinutes * 60_000,
-      maxBudgetUsd: settings.execution.maxBudgetUsdPerRun,
+      // Working sessions run as long as you let them, like Claude Code (you can always Stop).
+      // The per-run time limit in Settings is for Autopilot and quick questions.
+      timeoutMs: conv.mode === 'edit' ? SESSION_TIMEOUT_MS : settings.execution.agentTimeoutMinutes * 60_000,
+      maxBudgetUsd: conv.mode === 'edit' ? null : settings.execution.maxBudgetUsdPerRun,
       outputSchema: null,
       model: seat.model,
       effort: seat.effort,
@@ -416,7 +425,7 @@ export class ChatService {
           systemAppend: SESSION_SYSTEM,
           readRoots: [],
           access: 'workspace-write',
-          maxTurns: settings.execution.maxTurns,
+          maxTurns: SESSION_MAX_TURNS,
           // No OS sandbox for Claude here (it does not run on Windows); every command that is not
           // read-only needs the developer's approval instead, as in Claude Code's own terminal.
           // Codex always runs inside its own sandbox.
@@ -595,6 +604,7 @@ export class ChatService {
       agentRuntime: row.agentRuntime,
       allowedCommands: row.allowedCommands,
       permissionMode: row.permissionMode,
+      model: row.model,
       lastMessage: last ? truncate(last.content.replace(/\s+/g, ' '), 140) : null,
       running,
       lastStatus: lastAgent?.status ?? null,
@@ -604,6 +614,19 @@ export class ChatService {
       updatedAt: row.updatedAt,
     };
   }
+}
+
+function cleanModel(model: string | null | undefined): string | null {
+  const m = model?.trim();
+  return m ? m.slice(0, 120) : null;
+}
+
+/** A session's own model applies only to the AI it belongs to (a Claude model never goes to Codex). */
+function withModel(seat: SeatCandidate, model: string | null): SeatCandidate {
+  if (!model) return seat;
+  const forClaude = model.startsWith('claude-');
+  if ((seat.provider === 'claude') !== forClaude || seat.provider === 'scripted') return seat;
+  return { ...seat, model };
 }
 
 function titleFrom(message: string): string {

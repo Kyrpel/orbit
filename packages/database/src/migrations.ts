@@ -379,4 +379,8 @@ ALTER TABLE reviews ADD COLUMN kind TEXT NOT NULL DEFAULT 'quality';
     id: '0008_session_permission_mode',
     sql: `ALTER TABLE conversations ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'ask';`,
   },
+  {
+    id: '0009_session_model',
+    sql: `ALTER TABLE conversations ADD COLUMN model TEXT;`,
+  },
 ];

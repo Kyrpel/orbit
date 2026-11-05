@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router';
 import type { ChatEventDTO, ChatMessageDTO, ConversationDetailDTO, ConversationSummaryDTO, RepoDTO, SessionMode, SessionPermissionMode, TaskImprovementDTO } from '@orbit/shared';
 import { formatDuration } from '@orbit/shared';
 import { buildLiveModel, type LiveRun, type LiveStep } from '../lib/live-steps';
-import { del, keys, patch, post, useAction, useAgents, useChat, useChats, useSettings } from '../lib/api';
+import { del, keys, patch, post, useAction, useAgents, useChat, useChats, useSettings, useTeam } from '../lib/api';
 import { tabs, type WorkspaceTab } from '../lib/tabs';
 import { cn, timeAgo } from '../lib/utils';
 import { ChangesPanel } from './changes-panel';
@@ -115,6 +115,39 @@ export function CommandsSwitch({ value, onChange, provider }: { value: SessionPe
         ))}
       </div>
     </div>
+  );
+}
+
+/** Which model this tab uses. "Default" is the session agent's model for that AI (Agents page). */
+export function ModelPicker({ provider, value, onChange }: { provider: Provider; value: string | null; onChange: (m: string | null) => void }) {
+  const team = useTeam();
+  const agents = useAgents();
+  const seat = agents.data?.find((a) => a.role === 'assistant');
+  const ai = provider === 'auto' ? (seat?.resolved.provider === 'codex' ? 'codex' : 'claude') : provider;
+  const list = team.data?.providers.find((p) => p.provider === ai)?.models ?? [];
+  const fallback = ai === 'codex' ? seat?.codexModel : seat?.model;
+  const fits = (m: string | null | undefined) => !!m && (ai === 'claude') === m.startsWith('claude-');
+  const current = fits(value) ? value! : '';
+  const name = (m: string | null | undefined) => (m ? (list.find((x) => x.id === m)?.label ?? modelLabel(m) ?? m).replace(/^Claude /, '') : null);
+  return (
+    <label className="inline-flex items-center gap-1.5 text-2xs text-dust">
+      Model
+      <select
+        value={current}
+        onChange={(e) => onChange(e.target.value || null)}
+        aria-label="Model for this session"
+        title="Applies to this session only. Change the default on the Agents page (Session agent)."
+        className="h-8 max-w-[180px] rounded-[8px] border border-seam bg-hull px-2 text-xs text-chalk"
+      >
+        <option value="">Default ({name(fallback) ?? (ai === 'codex' ? 'Codex setting' : 'agent setting')})</option>
+        {list.map((m) => (
+          <option key={m.id} value={m.id}>
+            {m.label.replace(/^Claude /, '')}
+          </option>
+        ))}
+        {current && !list.some((m) => m.id === current) ? <option value={current}>{current}</option> : null}
+      </select>
+    </label>
   );
 }
 
@@ -330,10 +363,18 @@ function AgentTurn({ msg, events, seat, isLast, allowed, onAllow, onAllowAll, on
   const toolCount = items.filter((s) => s.kind !== 'say').length;
   type Line = { key: string; ts: string; step?: LiveStep; you?: ChatMessageDTO };
   const lines: Line[] = [...items.map((s) => ({ key: `s${s.id}`, ts: s.ts, step: s })), ...steered.map((m) => ({ key: m.id, ts: m.createdAt, you: m }))].sort((a, b) => a.ts.localeCompare(b.ts));
-  const cut = !showAll && !running && lines.length > SHOW_LAST + 2 ? lines.length - SHOW_LAST : 0;
-  // Your own messages stay visible even when earlier steps are folded away.
-  const shown = cut ? [...lines.slice(0, cut).filter((l) => l.you), ...lines.slice(cut)] : lines;
-  const hidden = cut ? lines.slice(0, cut).filter((l) => !l.you).length : 0;
+  // The agent's first message after one of yours is its reply to you.
+  const replies = new Set<string>();
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i]!.you) continue;
+    const reply = lines.slice(i + 1).find((l) => l.you || l.step?.kind === 'say');
+    if (reply?.step) replies.add(reply.key);
+  }
+  const cut = !showAll && lines.length > SHOW_LAST + 2 ? lines.length - SHOW_LAST : 0;
+  // Your own messages and the replies to them stay visible even when earlier steps are folded away.
+  const keep = (l: Line) => !!l.you || replies.has(l.key);
+  const shown = cut ? [...lines.slice(0, cut).filter(keep), ...lines.slice(cut)] : lines;
+  const hidden = cut ? lines.slice(0, cut).filter((l) => !keep(l)).length : 0;
   const plan = [...runs].reverse().find((r) => r.plan?.length)?.plan ?? null;
   const notes = model.blocks.filter((b) => b.type === 'milestone');
   const who = aiName(msg.runtime, seat);
@@ -381,9 +422,16 @@ function AgentTurn({ msg, events, seat, isLast, allowed, onAllow, onAllowAll, on
                 </span>
               </li>
             ) : s && s.kind === 'say' ? (
-              <li key={key} className="px-2 py-1 text-sm leading-6 text-chalk/85">
-                {s.detail ?? s.object}
-              </li>
+              replies.has(key) ? (
+                <li key={key} className="my-1 rounded-[10px] border-l-2 border-telemetry bg-telemetry/[0.06] px-3 py-1.5 text-sm leading-6 text-chalk">
+                  <span className="mr-1.5 text-2xs font-[650] text-telemetry">Reply to you</span>
+                  {s.detail ?? s.object}
+                </li>
+              ) : (
+                <li key={key} className="px-2 py-1 text-sm leading-6 text-chalk/85">
+                  {s.detail ?? s.object}
+                </li>
+              )
             ) : s ? (
               <StepLine key={key} step={s} folder={folder} />
             ) : null,
@@ -618,6 +666,8 @@ function Header({
   chat,
   provider,
   onProvider,
+  model,
+  onModel,
   children,
   trailing,
 }: {
@@ -626,6 +676,8 @@ function Header({
   chat: ConversationDetailDTO | null;
   provider: Provider;
   onProvider: (p: Provider) => void;
+  model?: string | null;
+  onModel?: (m: string | null) => void;
   children?: React.ReactNode;
   trailing?: React.ReactNode;
 }) {
@@ -639,6 +691,7 @@ function Header({
       </div>
       {children}
       {chat?.seat !== 'security' ? <ProviderSwitch value={provider} onChange={onProvider} /> : null}
+      {chat?.seat !== 'security' && onModel ? <ModelPicker provider={provider} value={model ?? null} onChange={onModel} /> : null}
       <SessionsMenu repo={repo} tab={tab} current={chat?.id ?? null} />
       {trailing}
     </div>
@@ -663,10 +716,11 @@ function NewSession({ repo, tab }: { repo: RepoDTO; tab: WorkspaceTab }) {
   const settings = useSettings();
   const [draft, setDraft] = useState('');
   const [provider, setProvider] = useState<Provider>('auto');
+  const [model, setModel] = useState<string | null>(null);
   const [mode, setMode] = useState<SessionMode>(canEdit ? 'edit' : 'ask');
   const [commands, setCommands] = useState<SessionPermissionMode | null>(null);
   const permissionMode = commands ?? settings.data?.execution.sessionCommands ?? 'ask';
-  const start = useAction((message: string) => post<ConversationDetailDTO>('/api/chats', { message, repoIds: [repo.id], mode, provider, permissionMode }), { invalidate: [keys.chats] });
+  const start = useAction((message: string) => post<ConversationDetailDTO>('/api/chats', { message, repoIds: [repo.id], mode, provider, permissionMode, model }), { invalidate: [keys.chats] });
   const seat = agents.data?.find((a) => a.role === 'assistant');
   const autoName = seat?.resolved.provider ? PROVIDER_NAME[seat.resolved.provider] : 'the AI';
   const who = provider === 'auto' ? autoName : PROVIDER_NAME[provider];
@@ -681,7 +735,18 @@ function NewSession({ repo, tab }: { repo: RepoDTO; tab: WorkspaceTab }) {
     });
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <Header repo={repo} tab={tab} chat={null} provider={provider} onProvider={setProvider} />
+      <Header
+        repo={repo}
+        tab={tab}
+        chat={null}
+        provider={provider}
+        onProvider={(p) => {
+          setProvider(p);
+          setModel(null);
+        }}
+        model={model}
+        onModel={setModel}
+      />
       <div className="flex flex-1 flex-col justify-center overflow-y-auto px-5 py-10">
         <div className="mx-auto w-full max-w-[680px]">
           <h1 className="text-[28px] leading-9">What should we do in {repo.name}?</h1>
@@ -719,7 +784,9 @@ function RunningSession({ repo, tab, sessionId }: { repo: RepoDTO; tab: Workspac
   const send = useAction((v: { message: string; now?: boolean }) => post<ConversationDetailDTO>(`/api/chats/${sessionId}/messages`, v), { invalidate });
   const unqueue = useAction((messageId: string) => del<ConversationDetailDTO>(`/api/chats/${sessionId}/messages/${messageId}`), { invalidate });
   const stop = useAction(() => post(`/api/chats/${sessionId}/cancel`), { invalidate });
-  const setProvider = useAction((provider: Provider) => patch(`/api/chats/${sessionId}`, { provider }), { invalidate });
+  // A model belongs to one AI, so switching AI goes back to that AI's default model.
+  const setProvider = useAction((provider: Provider) => patch(`/api/chats/${sessionId}`, { provider, model: null }), { invalidate });
+  const setModel = useAction((model: string | null) => patch(`/api/chats/${sessionId}`, { model }), { invalidate });
   const allow = useAction((command: string) => post<ConversationDetailDTO>(`/api/chats/${sessionId}/allow`, { command }), { invalidate });
   const allowAll = useAction(() => post<ConversationDetailDTO>(`/api/chats/${sessionId}/allow-all`), { invalidate });
   const setCommands = useAction((permissionMode: SessionPermissionMode) => patch(`/api/chats/${sessionId}`, { permissionMode }), {
@@ -747,6 +814,8 @@ function RunningSession({ repo, tab, sessionId }: { repo: RepoDTO; tab: Workspac
           chat={c}
           provider={c.provider}
           onProvider={(p) => setProvider.mutate(p)}
+          model={c.model}
+          onModel={(m) => setModel.mutate(m)}
           trailing={
             confirmDelete ? (
             <span className="flex items-center gap-1.5 text-xs">

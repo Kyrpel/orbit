@@ -31,4 +31,6 @@ All notable changes to Orbit are documented here. The format follows [Keep a Cha
 - New light, friendlier interface: white work surfaces, a top bar, plain language, and colour with meaning (amber for you, teal for an AI at work).
 - Talk to the agent while it works, like Claude Code: a message sent mid-answer is read at the agent's next step (Claude Code via live stream-json input, Codex via its app-server `turn/steer`). Send now interrupts; messages that cannot be delivered yet are queued and sent together when the answer ends.
 - Codex on Windows uses the "unelevated" sandbox, so tools installed in the user folder (Python, Node) run while network, git writes and writes outside the project stay blocked.
+- Pick the model per workspace tab (Claude or Codex models; Default = the session agent's model). Working sessions have no time, step or budget cap per message, like Claude Code; Autopilot keeps its limits.
+- Replies to messages you sent mid-answer are marked "Reply to you" and stay visible; an open dashboard offers Reload when Orbit was updated, and dashboard files are served per request so rebuilds need no restart.
 - Single-project choice by default when starting a mission; changes spanning several projects are an explicit opt-in.

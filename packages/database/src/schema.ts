@@ -394,6 +394,8 @@ export const conversations = sqliteTable(
     seat: text('seat').$type<'assistant' | 'security'>().notNull().default('assistant'),
     /** `ask`: commands need approval. `auto`: Claude Code's auto mode decides. */
     permissionMode: text('permission_mode').$type<'ask' | 'auto'>().notNull().default('ask'),
+    /** This session's own model (overrides the session agent's model for that AI); null = default. */
+    model: text('model'),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },

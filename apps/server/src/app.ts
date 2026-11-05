@@ -77,12 +77,14 @@ const schemas = {
     permissionMode: z.enum(['ask', 'auto']).optional(),
     /** While the agent is busy: interrupt it and send this right away (otherwise it is queued). */
     now: z.boolean().optional(),
+    model: z.string().max(120).nullish(),
   }),
   patchChat: z.object({
     provider: z.enum(['auto', 'claude', 'codex']).optional(),
     mode: z.enum(['edit', 'ask']).optional(),
     title: z.string().max(200).optional(),
     permissionMode: z.enum(['ask', 'auto']).optional(),
+    model: z.string().max(120).nullish(),
   }),
   allowCommand: z.object({ command: z.string().min(1).max(4000) }),
   commit: z.object({ message: z.string().min(1).max(5000) }),
@@ -383,7 +385,8 @@ export async function buildApp(orbit: Orbit, opts: AppOptions): Promise<FastifyI
   // --- dashboard -------------------------------------------------------------
   const dist = resolveWebDist(opts.webDist);
   if (dist) {
-    await app.register(fastifyStatic, { root: dist, prefix: '/', wildcard: false, index: false, maxAge: '1h', immutable: false });
+    // Files are looked up per request (wildcard), so rebuilding the dashboard never needs a restart.
+    await app.register(fastifyStatic, { root: dist, prefix: '/', wildcard: true, index: false, maxAge: '1h', immutable: false });
     // Read per request (it is tiny) so a rebuilt dashboard never points at deleted asset hashes.
     const indexHtml = () => readFileSync(path.join(dist, 'index.html'), 'utf8');
     app.get('/', async (_req, reply) => reply.type('text/html').header('Cache-Control', 'no-cache').send(indexHtml()));

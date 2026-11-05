@@ -610,6 +610,8 @@ export interface ConversationSummaryDTO {
    * risky ones (Claude Code's auto mode). Orbit's hard limits apply in both.
    */
   permissionMode: SessionPermissionMode;
+  /** The model picked for this session (Claude ids start with `claude-`); null = the agent's default. */
+  model: string | null;
   lastMessage: string | null;
   running: boolean;
   /** How the agent's last turn ended (null before the first answer). */

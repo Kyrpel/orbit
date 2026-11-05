@@ -405,6 +405,24 @@ describe('working sessions (the workspace)', () => {
     expect(orbit.chat.detail(s.id)).toMatchObject({ provider: 'codex', agentRuntime: 'codex-cli' });
   });
 
+  it('uses the model picked for the session, only for the AI it belongs to', async () => {
+    const claudeCalls: AgentRunRequest[] = [];
+    const codexCalls: AgentRunRequest[] = [];
+    const repo = await setup([fake('claude-code-cli', { calls: claudeCalls }), fake('codex-cli', { calls: codexCalls })]);
+    const s = orbit.chat.start({ message: 'One', repoIds: [repo.id], mode: 'edit', model: 'claude-haiku-5-5' });
+    expect(s.model).toBe('claude-haiku-5-5');
+    await until(() => !orbit.chat.isRunning(s.id));
+    expect(claudeCalls[0]?.model).toBe('claude-haiku-5-5');
+    // A Claude model is never sent to Codex: Codex gets its own default.
+    orbit.chat.send(s.id, { message: 'Two', provider: 'codex' });
+    await until(() => codexCalls.length === 1 && !orbit.chat.isRunning(s.id));
+    expect(codexCalls[0]?.model).toBeNull();
+    orbit.chat.update(s.id, { model: 'gpt-6-sol' });
+    orbit.chat.send(s.id, { message: 'Three' });
+    await until(() => codexCalls.length === 2 && !orbit.chat.isRunning(s.id));
+    expect(codexCalls[1]?.model).toBe('gpt-6-sol');
+  });
+
   it('refuses to edit read-only projects and multi-project sessions', async () => {
     const repo = await setup([fake('claude-code-cli')]);
     orbit.repos.update(repo.id, { allowModify: false });

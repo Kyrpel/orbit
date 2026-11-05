@@ -2,6 +2,7 @@ import { Activity, Bot, FolderGit2, LayoutGrid, MoreHorizontal, Plug, Rocket, Se
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { NavLink, useLocation } from 'react-router';
 import { useOverview } from '../lib/api';
+import { useNewVersion } from '../lib/new-version';
 import { cn } from '../lib/utils';
 import { Toaster } from './ui';
 
@@ -80,8 +81,17 @@ export function Shell({ children, live }: { children: ReactNode; live: 'connecti
   const attention = overview.data?.counts.attention ?? 0;
   const { pathname } = useLocation();
   const fullBleed = pathname === '/' || pathname.startsWith('/s/');
+  const updated = useNewVersion(live);
   return (
     <div className="flex min-h-screen flex-col">
+      {updated ? (
+        <div className="flex items-center justify-center gap-3 bg-telemetry px-4 py-2 text-sm text-hull" role="status">
+          Orbit was updated. Reload to get the latest version.
+          <button type="button" onClick={() => window.location.reload()} className="rounded-[8px] bg-hull px-3 py-1 text-xs font-[650] text-telemetry hover:bg-hull-2">
+            Reload
+          </button>
+        </div>
+      ) : null}
       <header className="sticky top-0 z-20 flex h-14 shrink-0 items-center gap-4 border-b border-seam bg-hull/95 px-4 backdrop-blur-sm md:px-5">
         <Logo />
         <nav className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto" aria-label="Main">
