@@ -34,7 +34,7 @@ function FileName({ path }: { path: string }) {
  * The project's uncommitted changes, next to the session that makes them: what
  * changed, the diff, a commit box, and a security check by the security reviewer.
  */
-export function ChangesPanel({ repo, running, editEvents, open, onClose }: { repo: RepoDTO; running: boolean; editEvents: number; open: boolean; onClose: () => void }) {
+export function ChangesPanel({ repo, running, editEvents, open, onClose, docked = true }: { repo: RepoDTO; running: boolean; editEvents: number; open: boolean; onClose: () => void; docked?: boolean }) {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const changes = useChanges(repo.id);
@@ -151,9 +151,9 @@ export function ChangesPanel({ repo, running, editEvents, open, onClose }: { rep
 
   return (
     <>
-      <div className="hidden w-[400px] shrink-0 border-l border-seam xl:flex">{body}</div>
+      {docked ? <div className="hidden w-[400px] shrink-0 border-l border-seam xl:flex">{body}</div> : null}
       {open ? (
-        <div className="fixed inset-0 z-30 xl:hidden">
+        <div className={cn('fixed inset-0 z-30', docked && 'xl:hidden')}>
           <button type="button" className="absolute inset-0 bg-[#1c2333]/20" onClick={onClose} aria-label="Close changes" />
           <div className="absolute inset-y-0 right-0 flex w-[min(420px,92vw)] border-l border-seam shadow-[-16px_0_40px_-24px_rgb(16_24_40/0.35)]">{body}</div>
         </div>

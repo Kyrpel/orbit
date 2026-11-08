@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { execa } from 'execa';
 import { redactSecrets } from '@orbit/shared';
@@ -8,7 +9,9 @@ import {
   emptyResult,
   extractJson,
   commandRules,
+  imageNote,
   isUsageLimitError,
+  type AgentImage,
   type AgentRunContext,
   type AgentRunRequest,
   type AgentRunResult,
@@ -17,27 +20,53 @@ import {
   type RuntimeAvailability,
 } from './runtime';
 
-/** Commands the engineer may never run, enforced by Claude Code's own permission rules. */
-const DENY_RULES = [
-  'Bash(git push *)',
-  'Bash(git push)',
-  'Bash(git remote *)',
-  'Bash(git commit *)',
-  'Bash(git rebase *)',
-  'Bash(git reset --hard *)',
-  'Bash(git config --global *)',
-  'Bash(gh *)',
-  'Bash(npm publish *)',
-  'Bash(pnpm publish *)',
-  'Bash(yarn publish *)',
-  'Bash(sudo *)',
-  'Bash(ssh *)',
-  'Bash(scp *)',
-  'Read(**/.env)',
-  'Read(**/.env.local)',
-  'Read(**/*.pem)',
-  'Read(**/id_rsa*)',
+/**
+ * A user message for Claude Code's stream-json input: plain text, or the images first and
+ * then the text (as Claude Code sends a pasted screenshot). Exported for tests.
+ */
+export function userContent(text: string, images?: AgentImage[]): string | Record<string, unknown>[] {
+  if (!images?.length) return text;
+  const blocks: Record<string, unknown>[] = [];
+  for (const img of images) {
+    try {
+      blocks.push({ type: 'image', source: { type: 'base64', media_type: img.mediaType, data: readFileSync(img.path).toString('base64') } });
+    } catch {
+      /* a deleted upload: send the rest */
+    }
+  }
+  return [...blocks, { type: 'text', text }];
+}
+
+/** Shell commands Claude Code refuses everywhere (Orbit's own policy checks them too). */
+const DENY_ALWAYS = [
+  'git push --force*',
+  'git push -f*',
+  'git push * --force*',
+  'git push * -f',
+  'git push * -f *',
+  'git remote add *',
+  'git remote remove *',
+  'git remote set-url *',
+  'git rebase *',
+  'git reset --hard *',
+  'git config --global *',
+  'gh *',
+  'npm publish *',
+  'pnpm publish *',
+  'yarn publish *',
+  'sudo *',
+  'ssh *',
+  'scp *',
 ];
+/** Autopilot only: there Orbit commits and pushes itself, after your approval. */
+const DENY_MISSIONS = ['git push *', 'git push', 'git remote *', 'git commit *'];
+const DENY_READS = ['Read(**/.env)', 'Read(**/.env.local)', 'Read(**/*.pem)', 'Read(**/id_rsa*)'];
+
+/** Claude Code deny rules; working sessions may commit and push when the developer asks. */
+export function denyRules(allowGit: boolean): string[] {
+  const shell = [...DENY_ALWAYS, ...(allowGit ? [] : DENY_MISSIONS)];
+  return [...shell.flatMap((c) => [`Bash(${c})`, `PowerShell(${c})`]), ...DENY_READS];
+}
 
 /**
  * Runs agents through the developer's locally installed Claude Code CLI in
@@ -109,7 +138,7 @@ export class ClaudeCodeCliRuntime implements AgentRuntime {
       // One argv element per rule: rules may contain spaces and quotes.
       ...allowed,
       '--disallowedTools',
-      DENY_RULES.join(','),
+      denyRules(!!req.allowGit && req.access === 'workspace-write').join(','),
       '--permission-mode',
       permissionMode,
       '--max-turns',
@@ -157,7 +186,7 @@ export class ClaudeCodeCliRuntime implements AgentRuntime {
         cwd: req.cwd,
         env: buildAgentEnv(this.env),
         extendEnv: false,
-        ...(live ? { stdin: 'pipe' as const } : { input: req.prompt }),
+        ...(live ? { stdin: 'pipe' as const } : { input: `${req.prompt}${imageNote(req.images)}` }),
         reject: false,
         windowsHide: true,
         cancelSignal: controller.signal,
@@ -173,9 +202,9 @@ export class ClaudeCodeCliRuntime implements AgentRuntime {
       // Live input: the prompt is the first message; later ones arrive while the agent works and
       // Claude Code folds them in at its next step, as when you type into its terminal.
       let inputOpen = live && !!sub.stdin;
-      const writeMessage = (text: string): boolean => {
+      const writeMessage = (text: string, images?: AgentImage[]): boolean => {
         if (!inputOpen || !sub.stdin || sub.stdin.destroyed) return false;
-        sub.stdin.write(`${JSON.stringify({ type: 'user', message: { role: 'user', content: text } })}\n`);
+        sub.stdin.write(`${JSON.stringify({ type: 'user', message: { role: 'user', content: userContent(text, images) } })}\n`);
         return true;
       };
       closeInput = () => {
@@ -185,7 +214,7 @@ export class ClaudeCodeCliRuntime implements AgentRuntime {
         sub.stdin?.end();
       };
       if (live) {
-        writeMessage(req.prompt);
+        writeMessage(req.prompt, req.images);
         ctx.onSteerReady?.(writeMessage);
       }
       if (sub.stdout) {

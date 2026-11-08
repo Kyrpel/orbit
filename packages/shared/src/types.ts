@@ -312,6 +312,27 @@ export interface AgentEventData {
   plan?: AgentPlanItem[];
   /** Set on the event that reports a failed tool call. */
   failed?: boolean;
+  /** The runtime's own tool name (`Bash`, `Edit`, `Read`…), on tool events. */
+  tool?: string;
+  /** What the step produced. Edits know it when they start; other steps when they end. */
+  output?: StepOutput;
+  /** Set on the event that reports a step's successful result. */
+  result?: boolean;
+}
+
+/**
+ * What a step produced, shown under it in the terminal view (Claude Code's `⎿` lines).
+ * Always short and redacted: the first lines of some output, or an edit's changed lines.
+ */
+export interface StepOutput {
+  /** The first lines of the output, or a one-line result such as `Read 120 lines`. */
+  text?: string;
+  /** How many lines the full output (or diff) had, when only the start is kept. */
+  lines?: number;
+  /** An edit's lines, each starting with `+` (added), `-` (removed) or a space (unchanged). */
+  diff?: string[];
+  added?: number;
+  removed?: number;
 }
 
 /** Structured `data` on verification command events. */
@@ -557,9 +578,89 @@ export interface ChatMessageDTO {
   suggestion: MissionSuggestion | null;
   /** Commands the agent wanted to run but that need your approval first. */
   blocked: BlockedCommand[];
+  /** Images you attached to this message (pasted or dropped), shown as `[Image #1]` in its text. */
+  attachments: ChatAttachmentDTO[];
   durationMs: number | null;
   createdAt: string;
   finishedAt: string | null;
+}
+
+/** A Claude Code plugin (skills, agents, commands, hooks or MCP servers) from a marketplace. */
+export interface PluginDTO {
+  /** `name@marketplace`. */
+  id: string;
+  name: string;
+  marketplace: string;
+  marketplaceLabel: string;
+  description: string | null;
+  version: string | null;
+  installs: number | null;
+  sourceUrl: string | null;
+  /** Installs by running a command the marketplace declares: do that in Claude Code itself. */
+  needsCommand: boolean;
+  installed: boolean;
+  enabled: boolean | null;
+}
+
+/** A skill folder of your own in Claude Code's skills folder. */
+export interface UserSkillDTO {
+  name: string;
+  description: string | null;
+  path: string;
+}
+
+export interface SkillsDTO {
+  /** False when Claude Code is missing or could not list its plugins (`reason` says why). */
+  available: boolean;
+  reason: string | null;
+  installed: PluginDTO[];
+  skills: UserSkillDTO[];
+  /** Search results, popular first. */
+  results: PluginDTO[];
+  /** How many plugins match, beyond the ones shown. */
+  total: number;
+  marketplaces: { name: string; label: string; count: number }[];
+  updatedAt: string | null;
+}
+
+/** What an installed plugin contains and costs, as Claude Code reports it. */
+export interface PluginDetailsDTO {
+  id: string;
+  text: string;
+  skills: string[];
+  agents: number;
+  /** Hooks run commands on their own; MCP servers are programs. Both deserve trust. */
+  hooks: number;
+  mcpServers: number;
+  alwaysOn: string | null;
+}
+
+export interface PluginActionDTO {
+  ok: boolean;
+  message: string;
+}
+
+/** An image attached to a message. `url` serves it to the signed-in dashboard. */
+export interface ChatAttachmentDTO {
+  id: string;
+  name: string;
+  mediaType: string;
+  size: number;
+  url: string;
+}
+
+export const CHAT_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const;
+export type ChatImageType = (typeof CHAT_IMAGE_TYPES)[number];
+/** Claude takes images up to 5 MB each; a message carries a handful, like a pasted screenshot or two. */
+export const CHAT_IMAGE_LIMITS = { maxImages: 6, maxBytes: 5 * 1024 * 1024 } as const;
+/** Long pastes (logs, files) are welcome: Claude Code takes them too. */
+export const MAX_CHAT_MESSAGE = 200_000;
+
+/** An image sent with a message: base64 data without the `data:` prefix. */
+export interface ChatImageInput {
+  name: string;
+  mediaType: ChatImageType;
+  data: string;
 }
 
 export interface BlockedCommand {
@@ -612,6 +713,8 @@ export interface ConversationSummaryDTO {
   permissionMode: SessionPermissionMode;
   /** The model picked for this session (Claude ids start with `claude-`); null = the agent's default. */
   model: string | null;
+  /** The reasoning effort picked for this session; null = the session agent's effort. */
+  effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null;
   lastMessage: string | null;
   running: boolean;
   /** How the agent's last turn ended (null before the first answer). */
@@ -627,6 +730,20 @@ export interface ConversationSummaryDTO {
 export interface ConversationDetailDTO extends ConversationSummaryDTO {
   messages: ChatMessageDTO[];
   events: ChatEventDTO[];
+  /** The agent is waiting for your answer before it runs something (Codex, outside its sandbox). */
+  approval: SessionApprovalDTO | null;
+}
+
+/** Codex asking, mid-answer, to run something its sandbox blocks (a push, a commit, a download). */
+export interface SessionApprovalDTO {
+  id: string;
+  kind: 'command' | 'file';
+  /** The command, already redacted; null for a file change. */
+  command: string | null;
+  reason: string | null;
+  /** True when it asks for network access. */
+  network: boolean;
+  createdAt: string;
 }
 
 /** The Prompt engineer's rewrite of a rough task into a clear, complete one. */

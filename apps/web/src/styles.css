@@ -110,6 +110,147 @@
   }
 }
 
+/*
+  Terminal theme (the default): each workspace pane is a terminal running an AI agent,
+  drawn the way Claude Code draws itself, so it feels familiar to anyone who uses it.
+  The palette is Claude Code's dark theme; the font is the one the terminal uses
+  (Cascadia Mono in Windows Terminal, SF Mono or Menlo on a Mac).
+  Colour meaning stays the same everywhere: orange = an AI at work, yellow = waiting for
+  you, green = done, red = a problem, blue-violet = a question or choice for you.
+*/
+html[data-theme='terminal'] {
+  --t-font: 'Cascadia Mono', 'Cascadia Code', Consolas, 'SF Mono', Menlo, Monaco, 'DejaVu Sans Mono', 'Liberation Mono', monospace;
+  --t-bg: #0c0c0c;
+  --t-fg: #f2f2f2;
+  --t-dim: #999999;
+  --t-faint: #6b6b6b;
+  --t-border: #888888;
+  --t-sep: #2e2e2e;
+  --t-claude: #d77757;
+  --t-ok: #4eba65;
+  --t-err: #ff6b80;
+  --t-warn: #ffc107;
+  --t-perm: #b1b9f9;
+  --t-auto: #af87ff;
+  --t-plan: #48968c;
+  --t-user: #262626;
+  --t-add: #225c2b;
+  --t-del: #7a2936;
+
+  --color-night: #141414;
+  --color-hull: #0c0c0c;
+  --color-hull-2: #1a1a1a;
+  --color-hull-3: #262626;
+  --color-seam: #2e2e2e;
+  --color-seam-2: #4a4a4a;
+  --color-chalk: #f2f2f2;
+  --color-dust: #999999;
+  --color-dust-2: #6b6b6b;
+  --color-signal: #ffc107;
+  --color-signal-ink: #1f1600;
+  --color-signal-deep: #ffc107;
+  --color-telemetry: #d77757;
+  --color-go: #4eba65;
+  --color-fault: #ff6b80;
+  --color-claude: #d77757;
+  --color-codex: #7aa5ff;
+  --font-sans: var(--t-font);
+  --font-mono: var(--t-font);
+  color-scheme: dark;
+  font-family: var(--t-font);
+  font-variation-settings: normal;
+  font-feature-settings: normal;
+  font-size: 14px;
+}
+html[data-theme='terminal'] body {
+  font-feature-settings: normal;
+}
+html[data-theme='terminal'] :is(h1, h2, h3, .casual) {
+  font-variation-settings: normal;
+  letter-spacing: 0;
+}
+/* Terminal windows have small corners; dots and pills stay round. */
+html[data-theme='terminal'] [class*='rounded-']:not([class*='rounded-full']):not([class*='rounded-t-']) {
+  border-radius: 6px;
+}
+html[data-theme='terminal'] [class*='rounded-t-'] {
+  border-top-left-radius: 6px;
+  border-top-right-radius: 6px;
+}
+html[data-theme='terminal'] ::selection {
+  background: color-mix(in oklab, var(--color-telemetry) 35%, transparent);
+}
+
+/* Terminal colours, used by the terminal panes (components/terminal.tsx). */
+@utility t-fg {
+  color: var(--t-fg);
+}
+@utility t-dim {
+  color: var(--t-dim);
+}
+@utility t-faint {
+  color: var(--t-faint);
+}
+@utility t-claude {
+  color: var(--t-claude);
+}
+@utility t-ok {
+  color: var(--t-ok);
+}
+@utility t-err {
+  color: var(--t-err);
+}
+@utility t-warn {
+  color: var(--t-warn);
+}
+@utility t-perm {
+  color: var(--t-perm);
+}
+@utility t-auto {
+  color: var(--t-auto);
+}
+@utility t-plan {
+  color: var(--t-plan);
+}
+@utility t-code {
+  color: var(--t-perm);
+}
+@utility t-user {
+  background-color: var(--t-user);
+}
+@utility t-add {
+  background-color: var(--t-add);
+  color: #eaffea;
+}
+@utility t-del {
+  background-color: var(--t-del);
+  color: #ffeaea;
+}
+@utility t-box {
+  border-color: var(--t-border);
+}
+@utility t-box-perm {
+  border-color: var(--t-perm);
+}
+@utility t-box-claude {
+  border-color: var(--t-claude);
+}
+@utility t-box-warn {
+  border-color: var(--t-warn);
+}
+@utility t-sep {
+  border-color: var(--t-sep);
+}
+/* The running step's dot blinks, as in Claude Code. */
+@utility term-blink {
+  animation: term-blink 1.1s steps(1, end) infinite;
+}
+@keyframes term-blink {
+  50% {
+    opacity: 0.15;
+  }
+}
+
 @utility mono {
   font-family: var(--font-mono);
   font-variation-settings: 'MONO' 1, 'CASL' 0;

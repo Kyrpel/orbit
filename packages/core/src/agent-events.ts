@@ -17,9 +17,15 @@ export function agentEventRecord(e: AgentEvent, runId: string): AgentEventRecord
     case 'text':
       return { kind: 'agent', title: truncate(firstLine(e.text), 200) || 'Message', detail: e.text, data: { runId } };
     case 'tool':
-      return { kind: 'tool', title: e.summary, data: { runId, toolUseId: e.id ?? null, step: e.step ?? 'other', target: e.target ?? null, ...(e.plan ? { plan: e.plan } : {}) } };
+      return {
+        kind: 'tool',
+        title: e.summary,
+        data: { runId, toolUseId: e.id ?? null, tool: e.tool, step: e.step ?? 'other', target: e.target ?? null, ...(e.plan ? { plan: e.plan } : {}), ...(e.output ? { output: e.output } : {}) },
+      };
     case 'tool_result':
-      return { kind: 'tool', title: 'Tool error', detail: e.summary, data: { runId, toolUseId: e.id ?? null, failed: true } };
+      return e.isError
+        ? { kind: 'tool', title: 'Tool error', detail: e.summary, data: { runId, toolUseId: e.id ?? null, failed: true } }
+        : { kind: 'tool', title: 'Tool output', data: { runId, toolUseId: e.id ?? null, result: true, ...(e.output ? { output: e.output } : {}) } };
     case 'denied':
       return {
         kind: 'error',

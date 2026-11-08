@@ -22,3 +22,4 @@ export * from './secrets';
 export * from './team';
 export * from './triggers';
 export * from './workspace';
+export * from './skills';

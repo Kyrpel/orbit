@@ -1,11 +1,13 @@
-import { FolderPlus, Plus, Search, X } from 'lucide-react';
+import { FolderPlus, LayoutGrid, Plus, Search, Square, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import type { ConversationSummaryDTO, RepoDTO } from '@orbit/shared';
 import { TabView } from '../components/session';
+import { TerminalTabView } from '../components/terminal';
 import { Button, ErrorNote, Loading } from '../components/ui';
 import { useChats, useRepos } from '../lib/api';
-import { tabs, useTabs, type WorkspaceTab } from '../lib/tabs';
+import { tabs, useTabs, type WorkspaceLayout, type WorkspaceTab } from '../lib/tabs';
+import { useTheme } from '../lib/theme';
 import { cn, timeAgo } from '../lib/utils';
 
 /*
@@ -75,11 +77,11 @@ function projectLamp(repoId: string, sessions: ConversationSummaryDTO[]): Lamp {
 
 // ---------------------------------------------------------------------------
 
-function ProjectRail({ repos, sessions, activeRepo, onOpen }: { repos: RepoDTO[]; sessions: ConversationSummaryDTO[]; activeRepo: string | null; onOpen: (repoId: string) => void }) {
+function ProjectRail({ repos, sessions, activeRepo, onOpen, narrow }: { repos: RepoDTO[]; sessions: ConversationSummaryDTO[]; activeRepo: string | null; onOpen: (repoId: string) => void; narrow?: boolean }) {
   const [filter, setFilter] = useState('');
   const shown = repos.filter((r) => !filter.trim() || `${r.name} ${r.localPath}`.toLowerCase().includes(filter.trim().toLowerCase()));
   return (
-    <nav className="hidden w-[248px] shrink-0 flex-col border-r border-seam bg-night md:flex" aria-label="Your projects">
+    <nav className={cn('hidden w-[248px] shrink-0 flex-col border-r border-seam bg-night', narrow ? '2xl:flex' : 'md:flex')} aria-label="Your projects">
       <div className="flex items-center justify-between px-4 pb-2 pt-4">
         <h2 className="text-sm">Your projects</h2>
         <Link to="/projects" className="grid size-7 place-items-center rounded-[8px] text-dust hover:bg-hull-3 hover:text-chalk" aria-label="Add a project" title="Add a project">
@@ -149,7 +151,28 @@ function ProjectPicker({ repos, onPick, onClose }: { repos: RepoDTO[]; onPick: (
   );
 }
 
-function TabStrip({ list, active, repos, sessions, onSelect }: { list: WorkspaceTab[]; active: string | null; repos: RepoDTO[]; sessions: ConversationSummaryDTO[]; onSelect: (t: WorkspaceTab) => void }) {
+function LayoutSwitch({ value }: { value: WorkspaceLayout }) {
+  const opt = (v: WorkspaceLayout, label: string, Icon: typeof Square, hint: string) => (
+    <button
+      type="button"
+      onClick={() => tabs.setLayout(v)}
+      aria-pressed={value === v}
+      title={hint}
+      className={cn('flex h-7 items-center gap-1.5 rounded-[6px] px-2.5 text-xs transition-colors', value === v ? 'bg-hull font-[600] text-chalk shadow-[0_1px_2px_rgb(16_24_40/0.1)]' : 'text-dust hover:text-chalk')}
+    >
+      <Icon className="size-3.5" aria-hidden />
+      {label}
+    </button>
+  );
+  return (
+    <div className="mb-1.5 ml-auto hidden shrink-0 items-center gap-0.5 rounded-[8px] bg-hull-3 p-0.5 lg:flex" role="group" aria-label="Layout">
+      {opt('grid', 'Side by side', LayoutGrid, 'See every open project at once')}
+      {opt('tabs', 'One at a time', Square, 'One project full size, switch with the tabs')}
+    </div>
+  );
+}
+
+function TabStrip({ list, active, repos, sessions, onSelect, layout }: { list: WorkspaceTab[]; active: string | null; repos: RepoDTO[]; sessions: ConversationSummaryDTO[]; onSelect: (t: WorkspaceTab) => void; layout: WorkspaceLayout }) {
   const [picking, setPicking] = useState(false);
   const navigate = useNavigate();
   return (
@@ -209,6 +232,84 @@ function TabStrip({ list, active, repos, sessions, onSelect }: { list: Workspace
           />
         ) : null}
       </div>
+      <LayoutSwitch value={layout} />
+    </div>
+  );
+}
+
+/** Columns for n panes in a container this wide. */
+function gridColumns(n: number, width: number): number {
+  if (width < 760 || n <= 1) return 1;
+  if (n === 2 || n === 4) return 2;
+  return width >= 1500 ? 3 : 2;
+}
+
+function useSize<T extends HTMLElement>(): [React.RefObject<T | null>, { width: number; height: number }] {
+  const ref = useRef<T>(null);
+  const [size, setSize] = useState({ width: 1200, height: 800 });
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([e]) => e && setSize({ width: e.contentRect.width, height: e.contentRect.height }));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  return [ref, size];
+}
+
+/**
+ * Every open project at once, like a wall of terminals: each pane is a full session
+ * (live steps, Allow buttons, follow-ups). The focused pane has a teal edge; a pane
+ * waiting for you has an amber one, so you notice it without switching.
+ */
+function PaneGrid({ list, active, repos, sessions, onFocus, onExpand }: { list: WorkspaceTab[]; active: string | null; repos: RepoDTO[]; sessions: ConversationSummaryDTO[]; onFocus: (t: WorkspaceTab) => void; onExpand: (t: WorkspaceTab) => void }) {
+  const [box, size] = useSize<HTMLDivElement>();
+  const term = useTheme() === 'terminal';
+  const cols = gridColumns(list.length, size.width);
+  const rows = Math.ceil(list.length / cols);
+  // Fill the screen when the panes fit (each at least 380px tall); otherwise scroll.
+  const fits = size.height / rows >= 380;
+  return (
+    <div ref={box} className="min-h-0 flex-1 overflow-y-auto bg-night p-2">
+      <div
+        className="grid gap-2"
+        style={{
+          gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
+          gridAutoRows: fits ? `calc((${size.height}px - ${(rows - 1) * 8 + 16}px) / ${rows})` : '560px',
+        }}
+      >
+        {list.map((t, i) => {
+          const repo = repos.find((r) => r.id === t.repoId);
+          if (!repo) return null;
+          // The last pane fills the rest of its row, so there is no empty hole.
+          const span = i === list.length - 1 && list.length % cols ? cols - (list.length % cols) + 1 : 1;
+          const s = t.sessionId ? sessions.find((x) => x.id === t.sessionId) : null;
+          const lamp = t.sessionId ? lampOf(s) : 'new';
+          const on = t.key === active;
+          return (
+            <div
+              key={t.key}
+              id={`pane-${t.key}`}
+              style={span > 1 ? { gridColumn: `span ${span} / span ${span}` } : undefined}
+              onMouseDownCapture={() => !on && onFocus(t)}
+              onFocusCapture={() => !on && onFocus(t)}
+              className={cn(
+                'relative flex min-h-0 min-w-0 flex-col overflow-hidden rounded-[14px] border bg-hull transition-[border-color,box-shadow]',
+                on ? 'border-telemetry/55 shadow-[0_0_0_3px_rgb(11_124_113/0.10)]' : lamp === 'needs' ? 'border-signal shadow-[0_0_0_3px_rgb(243_174_61/0.18)]' : 'border-seam',
+              )}
+            >
+              {term ? (
+                <TerminalTabView tab={t} repo={repo} active={on} onExpand={list.length > 1 ? () => onExpand(t) : undefined} />
+              ) : (
+                <>
+                  {list.length > 1 ? <LampDot lamp={lamp} className="absolute left-3 top-[19px] z-10" /> : null}
+                  <TabView tab={t} repo={repo} compact={list.length > 1} onExpand={list.length > 1 ? () => onExpand(t) : undefined} />
+                </>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -219,7 +320,7 @@ function Welcome({ repos, sessions, onOpen }: { repos: RepoDTO[]; sessions: Conv
       <div className="m-auto w-full min-w-0 max-w-[880px]">
         <h1 className="text-[32px] leading-10">What are we working on?</h1>
         <p className="mt-2 max-w-[60ch] text-[15px] text-dust">
-          Pick a project. An AI works in it with you, like Claude Code in a terminal: it reads, edits and asks before running commands. Open as many projects as you like, each in its own tab.
+          Pick a project. An AI works in it with you, like Claude Code in a terminal: it reads, edits and asks before running commands. Open as many projects as you like and watch them all side by side.
         </p>
         <ul className="mt-8 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {repos.map((r) => {
@@ -286,6 +387,7 @@ function Welcome({ repos, sessions, onOpen }: { repos: RepoDTO[]; sessions: Conv
 
 export function WorkspacePage() {
   const { id = null } = useParams();
+  const term = useTheme() === 'terminal';
   const navigate = useNavigate();
   const repos = useRepos();
   const chats = useChats();
@@ -314,7 +416,17 @@ export function WorkspacePage() {
     tabs.activate(t.key);
     navigate(t.sessionId ? `/s/${t.sessionId}` : '/');
   };
-  const open = (repoId: string) => select(tabs.openProject(repoId));
+  const grid = state.layout === 'grid' && state.tabs.length > 0;
+  // In side by side, a click on a tab or project brings its pane into view.
+  const open = (repoId: string) => {
+    const t = tabs.openProject(repoId);
+    select(t);
+    if (grid) requestAnimationFrame(() => document.getElementById(`pane-${t.key}`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }));
+  };
+  const pick = (t: WorkspaceTab) => {
+    select(t);
+    if (grid) document.getElementById(`pane-${t.key}`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  };
 
   if (!list.length) {
     return (
@@ -332,10 +444,30 @@ export function WorkspacePage() {
 
   return (
     <div className="flex h-[calc(100vh-56px)] min-h-0">
-      <ProjectRail repos={list} sessions={sessions} activeRepo={activeRepo?.id ?? null} onOpen={open} />
+      <ProjectRail repos={list} sessions={sessions} activeRepo={activeRepo?.id ?? null} onOpen={open} narrow={grid && state.tabs.length > 1} />
       <div className="flex min-w-0 flex-1 flex-col">
-        {state.tabs.length ? <TabStrip list={state.tabs} active={state.active} repos={list} sessions={sessions} onSelect={select} /> : null}
-        {active && activeRepo ? <TabView tab={active} repo={activeRepo} /> : <Welcome repos={list} sessions={sessions} onOpen={open} />}
+        {state.tabs.length ? <TabStrip list={state.tabs} active={state.active} repos={list} sessions={sessions} onSelect={pick} layout={state.layout} /> : null}
+        {grid ? (
+          <PaneGrid
+            list={state.tabs}
+            active={state.active}
+            repos={list}
+            sessions={sessions}
+            onFocus={select}
+            onExpand={(t) => {
+              tabs.setLayout('tabs');
+              select(t);
+            }}
+          />
+        ) : active && activeRepo ? (
+          term ? (
+            <TerminalTabView tab={active} repo={activeRepo} />
+          ) : (
+            <TabView tab={active} repo={activeRepo} />
+          )
+        ) : (
+          <Welcome repos={list} sessions={sessions} onOpen={open} />
+        )}
       </div>
     </div>
   );

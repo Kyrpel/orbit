@@ -1,4 +1,4 @@
-import type { AgentEventData, AgentPlanItem, AgentStepKind, CommandEventData, MissionEventDTO, TeamSeat } from '@orbit/shared';
+import type { AgentEventData, AgentPlanItem, AgentStepKind, CommandEventData, MissionEventDTO, StepOutput, TeamSeat } from '@orbit/shared';
 
 /** The fields the live view reads; mission events and Ask conversation events both fit. */
 export type LiveEvent = Pick<MissionEventDTO, 'id' | 'ts' | 'kind' | 'title' | 'detail' | 'data'> & { actor: string };
@@ -27,6 +27,17 @@ export interface LiveStep {
   /** Full message text, or the error output of a failed step. */
   detail: string | null;
   toolUseId: string | null;
+  /** The runtime's tool name (`Bash`, `Edit`…), when recorded. */
+  tool?: string | null;
+  /** What the step produced (command output, an edit's lines), when recorded. */
+  output?: StepOutput | null;
+  /** On `plan` steps (only with `planSteps`): the to-do list at that moment. */
+  plan?: AgentPlanItem[] | null;
+}
+
+export interface LiveModelOptions {
+  /** Also keep each to-do list update as a step, where it happened (the terminal view). */
+  planSteps?: boolean;
 }
 
 export type RunOutcome = 'running' | 'succeeded' | 'failed' | 'cancelled' | 'stopped';
@@ -149,7 +160,7 @@ function settle(run: LiveRun) {
   for (const s of run.steps) if (s.status === 'running') s.status = 'done';
 }
 
-export function buildLiveModel(events: LiveEvent[], missionActive: boolean): LiveModel {
+export function buildLiveModel(events: LiveEvent[], missionActive: boolean, options: LiveModelOptions = {}): LiveModel {
   const blocks: LiveBlock[] = [];
   const runsById = new Map<string, LiveRun>();
   const openByRole = new Map<string, LiveRun>();
@@ -227,6 +238,16 @@ export function buildLiveModel(events: LiveEvent[], missionActive: boolean): Liv
 
       const run = (d.runId ? runsById.get(d.runId) : undefined) ?? (openByRole.get(role)?.outcome === 'running' ? openByRole.get(role) : undefined);
 
+      // A step's successful result: its output, and the step is done.
+      if (e.kind === 'tool' && d.result) {
+        const step = d.toolUseId ? run?.steps.find((s) => s.toolUseId === d.toolUseId) : undefined;
+        if (step) {
+          if (d.output) step.output = d.output;
+          if (step.status === 'running') step.status = 'done';
+        }
+        continue;
+      }
+
       if (run && isRunEnd(d)) {
         run.endedAt = e.ts;
         run.endTitle = e.title;
@@ -255,6 +276,11 @@ export function buildLiveModel(events: LiveEvent[], missionActive: boolean): Liv
 
       if (e.kind === 'tool' && d.plan) {
         run.plan = d.plan;
+        if (options.planSteps) {
+          settle(run);
+          stepCount++;
+          run.steps.push({ id: e.id, ts: e.ts, kind: 'plan', verb: { done: 'Updated plan', doing: 'Updating plan' }, object: e.title, status: 'done', detail: null, toolUseId: d.toolUseId ?? null, tool: d.tool ?? 'TodoWrite', output: null, plan: d.plan });
+        }
         continue;
       }
 
@@ -276,17 +302,27 @@ export function buildLiveModel(events: LiveEvent[], missionActive: boolean): Liv
         continue;
       }
 
-      if (e.kind === 'agent' && !e.detail && /^Session started/.test(e.title)) {
+      if (e.kind === 'agent' && !e.detail && /^Session (started|continued)/.test(e.title)) {
         const m = /\((.+)\)$/.exec(e.title);
         if (m && !run.model) run.model = m[1] ?? null;
         continue;
+      }
+
+      // The same call reported again (Codex re-runs a command once you approve it): one step.
+      if (e.kind === 'tool' && d.toolUseId) {
+        const t = describeTool(e.title, d);
+        const same = run.steps.find((s) => s.toolUseId === d.toolUseId && s.kind === t.kind && s.object === t.object);
+        if (same) {
+          same.status = 'running';
+          continue;
+        }
       }
 
       settle(run);
       stepCount++;
       if (e.kind === 'tool') {
         const t = describeTool(e.title, d);
-        run.steps.push({ id: e.id, ts: e.ts, kind: t.kind, verb: t.verb, object: t.object, status: 'running', detail: null, toolUseId: d.toolUseId ?? null });
+        run.steps.push({ id: e.id, ts: e.ts, kind: t.kind, verb: t.verb, object: t.object, status: 'running', detail: null, toolUseId: d.toolUseId ?? null, tool: d.tool ?? null, output: d.output ?? null });
       } else if (e.kind === 'error') {
         run.steps.push({ id: e.id, ts: e.ts, kind: 'blocked', verb: { done: 'Blocked', doing: 'Blocked' }, object: e.title.replace(/^Blocked\s*/, ''), status: 'failed', detail: e.detail, toolUseId: null });
       } else if (e.detail) {

@@ -103,3 +103,51 @@ describe('extractJson', () => {
     expect(extractJson('no json')).toBeNull();
   });
 });
+
+describe('git in working sessions', () => {
+  it('lets a working session commit and push, but never force-push or rewrite history', async () => {
+    const { evaluateToolUse, deniedCommandReason } = await import('../src');
+    const session = { cwd: process.cwd(), readRoots: [], access: 'workspace-write' as const, allowNetworkTools: false, allowGit: true };
+    for (const cmd of ['git add -A', 'git commit -m "Add sitemap"', 'git push', 'git push origin main', 'git checkout -b fix', 'git remote -v']) {
+      expect(evaluateToolUse('Bash', { command: cmd }, session), cmd).toEqual({ allow: true });
+    }
+    for (const cmd of ['git push --force', 'git push -f origin main', 'git push origin main --force-with-lease', 'git push origin +main', 'git reset --hard HEAD~1', 'git rebase -i main', 'git remote add evil x', 'git config --global user.name x', 'npm publish', 'sudo ls']) {
+      expect(evaluateToolUse('Bash', { command: cmd }, session).allow, cmd).toBe(false);
+    }
+    // Autopilot keeps its rules: Orbit commits and pushes there itself.
+    expect(deniedCommandReason('git commit -m x')).toMatch(/Orbit owns commits/);
+    expect(deniedCommandReason('git push origin main')).toMatch(/Orbit pushes/);
+    expect(deniedCommandReason('git push origin main', { allowGit: true })).toBeNull();
+  });
+
+  it('drops the commit and push deny rules for Claude Code only in working sessions', async () => {
+    const { denyRules } = await import('../src');
+    expect(denyRules(false)).toEqual(expect.arrayContaining(['Bash(git push *)', 'Bash(git commit *)', 'PowerShell(git push *)']));
+    const session = denyRules(true);
+    expect(session).not.toContain('Bash(git push *)');
+    expect(session).not.toContain('Bash(git commit *)');
+    expect(session).toEqual(expect.arrayContaining(['Bash(git push --force*)', 'Bash(git reset --hard *)', 'PowerShell(git push -f*)', 'Read(**/.env)']));
+  });
+});
+
+describe('step output previews', () => {
+  it('condenses results the way Claude Code prints them', async () => {
+    const { resultPreview, editPreview, snippetDiff, outputPreview } = await import('../src');
+    expect(resultPreview('Read', 'a\nb\nc\n')).toEqual({ text: 'Read 3 lines' });
+    expect(resultPreview('Glob', 'src/a.ts\nsrc/b.ts')).toEqual({ text: 'Found 2 files' });
+    expect(resultPreview('Edit', 'The file was updated')).toBeUndefined();
+    expect(resultPreview(undefined, 'x')).toBeUndefined();
+    expect(resultPreview('Bash', [{ type: 'text', text: 'one\ntwo' }])).toEqual({ text: 'one\ntwo' });
+    expect(outputPreview('')).toEqual({ text: '(No output)' });
+    expect(snippetDiff('a\nb\nc', 'a\nB\nc')).toEqual({ diff: [' a', '-b', '+B', ' c'], added: 1, removed: 1 });
+    expect(editPreview('Write', { file_path: 'x', content: 'x\ny\n' })).toEqual({ diff: ['+x', '+y'], added: 2, removed: 0 });
+    expect(editPreview('Read', { file_path: 'x' })).toBeUndefined();
+  });
+
+  it('never keeps more than the start of a long output, and redacts secrets', async () => {
+    const { outputPreview } = await import('../src');
+    const long = Array.from({ length: 50 }, (_, i) => `line ${i}`).join('\n');
+    expect(outputPreview(long)).toEqual({ text: 'line 0\nline 1\nline 2\nline 3', lines: 50 });
+    expect(outputPreview('token sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789').text).not.toContain('abcdefghijklmnopqrstuvwxyz0123456789');
+  });
+});

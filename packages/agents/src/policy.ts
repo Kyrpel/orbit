@@ -15,6 +15,8 @@ export interface ToolPolicy {
   allowNetworkTools: boolean;
   /** When set, only these exact command parts run; others are refused as needing approval. */
   allowedCommands?: string[] | null;
+  /** Working sessions: commit and push are allowed (with approval); see `deniedCommandReason`. */
+  allowGit?: boolean;
 }
 
 export type PolicyDecision = { allow: true } | { allow: false; reason: string; needsApproval?: boolean };
@@ -28,9 +30,11 @@ const NETWORK_TOOLS = new Set(['WebFetch', 'WebSearch']);
 export const READ_ONLY_TOOLS = ['Read', 'Glob', 'Grep'] as const;
 export const ENGINEER_TOOLS = ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash', 'PowerShell', 'TodoWrite'] as const;
 
+/** Refused everywhere: Autopilot and working sessions. */
 const DENIED_COMMANDS: ReadonlyArray<readonly [RegExp, string]> = [
-  [/\bgit\s+(?:-c\s+\S+\s+)*(push|remote|credential|config\s+--(?:global|system))\b/i, 'Orbit pushes branches itself after your approval.'],
-  [/\bgit\s+(?:-c\s+\S+\s+)*(commit|reset\s+--hard|checkout\s+(?:main|master)|rebase|merge)\b/i, 'Orbit owns commits and branches in the mission worktree.'],
+  [/\bgit\s+(?:-c\s+\S+\s+)*push\b[^\n;&|]*?(\s--force(?:-with-lease)?\b|\s-f\b|\s\+\S)/i, 'Force pushes are not allowed.'],
+  [/\bgit\s+(?:-c\s+\S+\s+)*(remote\s+(?:add|remove|rm|rename|set-url|set-head)|credential|config\s+--(?:global|system))\b/i, 'Changing git remotes, credentials or global settings is not allowed.'],
+  [/\bgit\s+(?:-c\s+\S+\s+)*(reset\s+--hard|rebase|filter-branch|filter-repo)\b/i, 'Rewriting git history is not allowed.'],
   [/(^|[\s;&|(])gh\s/i, 'GitHub actions go through Orbit approval gates.'],
   [/\b(npm|pnpm|yarn|bun)\s+publish\b/i, 'Publishing packages is not allowed.'],
   [/\b(curl|wget|iwr|Invoke-WebRequest)\b[^\n]*\|\s*(sh|bash|zsh|pwsh|powershell|iex)\b/i, 'Piping downloads into a shell is not allowed.'],
@@ -40,6 +44,22 @@ const DENIED_COMMANDS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\b(Remove-Item|rmdir|rd)\b[^\n]*\s([a-z]:[\\/]?|~|\$HOME|\$env:USERPROFILE)(\s|$)/i, 'Recursive deletes outside the worktree are not allowed.'],
   [/\b(printenv|env)\s*$|\bGet-ChildItem\s+env:|\bset\s*$/i, 'Dumping the environment is not allowed.'],
 ];
+
+/**
+ * Refused in Autopilot, where Orbit itself commits and pushes after your approval. In a
+ * working session the developer asks for these, so they run like any other command.
+ */
+const MISSION_ONLY_DENIED: ReadonlyArray<readonly [RegExp, string]> = [
+  [/\bgit\s+(?:-c\s+\S+\s+)*(push|remote)\b/i, 'Orbit pushes branches itself after your approval.'],
+  [/\bgit\s+(?:-c\s+\S+\s+)*(commit|checkout\s+(?:main|master)|merge)\b/i, 'Orbit owns commits and branches in the mission worktree.'],
+];
+
+/** Why Orbit refuses a shell command outright, or null when it may run (possibly after approval). */
+export function deniedCommandReason(command: string, opts: { allowGit?: boolean } = {}): string | null {
+  for (const [pattern, reason] of DENIED_COMMANDS) if (pattern.test(command)) return reason;
+  if (!opts.allowGit) for (const [pattern, reason] of MISSION_ONLY_DENIED) if (pattern.test(command)) return reason;
+  return null;
+}
 
 const SECRET_FILE = /(^|[\\/])(\.env(\.[^\\/]+)?|id_rsa|id_ed25519|.*\.pem|.*\.p12|.*\.pfx|credentials(\.json)?|\.npmrc|\.netrc|\.pypirc)$/i;
 const ALLOWED_ENV_EXAMPLES = /(^|[\\/])\.env\.(example|sample|template)$/i;
@@ -107,7 +127,8 @@ export function evaluateToolUse(tool: string, rawInput: unknown, policy: ToolPol
   if (SHELL_TOOLS.has(tool)) {
     if (policy.access !== 'workspace-write') return { allow: false, reason: 'This agent role cannot run commands.' };
     const command = typeof input.command === 'string' ? input.command : '';
-    for (const [pattern, reason] of DENIED_COMMANDS) if (pattern.test(command)) return { allow: false, reason };
+    const denied = deniedCommandReason(command, { allowGit: policy.allowGit });
+    if (denied) return { allow: false, reason: denied };
     if (policy.allowedCommands && !commandParts(command).every((part) => policy.allowedCommands!.includes(part))) {
       return { allow: false, reason: 'This command needs your approval first.', needsApproval: true };
     }

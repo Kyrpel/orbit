@@ -1,6 +1,9 @@
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 import {
   ASSISTANT_SYSTEM,
   assistantPrompt,
+  deniedCommandReason,
   isAllowableCommand,
   parseAssistantReply,
   SECURITY_CHAT_SYSTEM,
@@ -8,26 +11,36 @@ import {
   SESSION_READONLY_SYSTEM,
   SESSION_SYSTEM,
   sessionPrompt,
+  type AgentImage,
   type AgentRunRequest,
   type AgentRunResult,
+  type ApprovalDecision,
+  type ApprovalRequest,
   type SteerFn,
   type AssistantProject,
 } from '@orbit/agents';
-import { asc, desc, eq, inArray, conversationEvents, conversationMessages, conversations, type ConversationMessageRow, type ConversationRow } from '@orbit/database';
+import { asc, desc, eq, inArray, conversationEvents, conversationMessages, conversations, type ConversationMessageRow, type ConversationRow, type StoredAttachment } from '@orbit/database';
 import {
+  CHAT_IMAGE_LIMITS,
+  CHAT_IMAGE_TYPES,
   formatDuration,
+  MAX_CHAT_MESSAGE,
   newId,
+  type EffortLevel,
   OrbitError,
   redactSecrets,
   truncate,
   type BlockedCommand,
   type ChatEventDTO,
+  type ChatImageInput,
+  type ChatImageType,
   type ChatMessageDTO,
   type ConversationDetailDTO,
   type ConversationSummaryDTO,
   type MissionEventKind,
   type MissionSuggestion,
   type RepoDTO,
+  type SessionApprovalDTO,
   type SessionMode,
   type SessionPermissionMode,
 } from '@orbit/shared';
@@ -38,7 +51,7 @@ import { forgetResolvedRuntime } from './runtimes';
 import { forgetCodexAvailability, planSeat, type SeatCandidate } from './team';
 import { repoChanges } from './workspace';
 
-const MAX_MESSAGE = 20_000;
+const MAX_MESSAGE = MAX_CHAT_MESSAGE;
 const ASK_MAX_TURNS = 40;
 /** Effectively no limit for working sessions: a safety net for a process that hangs for a day. */
 const SESSION_TIMEOUT_MS = 24 * 60 * 60_000;
@@ -55,6 +68,9 @@ export interface StartSessionInput {
   provider?: Provider;
   permissionMode?: SessionPermissionMode;
   model?: string | null;
+  effort?: EffortLevel | null;
+  /** Images pasted or dropped into the first message. */
+  images?: ChatImageInput[];
 }
 
 /**
@@ -74,6 +90,8 @@ export class ChatService {
   private readonly running = new Map<string, AbortController>();
   /** For agents that take messages mid-answer: delivers one right away. */
   private readonly steers = new Map<string, SteerFn>();
+  /** Requests the agent is waiting on, oldest first (Codex asking to run what its sandbox blocks). */
+  private readonly approvals = new Map<string, { dto: SessionApprovalDTO; messageId: string; runId: string; resolve: (d: ApprovalDecision) => void }[]>();
 
   constructor(
     private readonly ctx: OrbitContext,
@@ -96,6 +114,7 @@ export class ChatService {
       ...this.summary(row, msgs),
       messages: msgs.map(toMessageDTO),
       events: events.map((e) => ({ id: e.id, conversationId: e.conversationId, messageId: e.messageId, ts: e.ts, kind: e.kind as MissionEventKind, actor: e.actor as ChatEventDTO['actor'], title: e.title, detail: e.detail, data: e.data })),
+      approval: this.approvals.get(id)?.[0]?.dto ?? null,
     };
   }
 
@@ -103,6 +122,7 @@ export class ChatService {
   start(input: StartSessionInput): ConversationDetailDTO {
     const message = this.clean(input.message);
     const repoIds = this.validRepoIds(input.repoIds ?? []);
+    decodeImages(input.images);
     const mode = this.allowedMode(input.mode ?? 'ask', repoIds);
     const id = newId('chat');
     const ts = nowIso(this.ctx);
@@ -116,12 +136,13 @@ export class ChatService {
         provider: input.provider ?? 'auto',
         permissionMode: input.permissionMode ?? this.ctx.settings.get().execution.sessionCommands,
         model: cleanModel(input.model),
+        effort: input.effort ?? null,
         allowedCommands: [],
         createdAt: ts,
         updatedAt: ts,
       })
       .run();
-    this.ask(id, message);
+    this.ask(id, message, undefined, input.images);
     return this.detail(id);
   }
 
@@ -131,26 +152,45 @@ export class ChatService {
    * Claude Code, and goes out as soon as the current answer ends; `now` interrupts the
    * current answer so it goes out right away.
    */
-  send(id: string, input: { message: string; provider?: Provider; mode?: SessionMode; repoIds?: string[]; permissionMode?: SessionPermissionMode; model?: string | null; now?: boolean }): ConversationDetailDTO {
+  send(id: string, input: { message: string; provider?: Provider; mode?: SessionMode; repoIds?: string[]; permissionMode?: SessionPermissionMode; model?: string | null; effort?: EffortLevel | null; images?: ChatImageInput[]; now?: boolean }): ConversationDetailDTO {
     this.row(id);
     const message = this.clean(input.message);
+    decodeImages(input.images);
     this.update(id, input);
     if (this.running.has(id)) {
       const ts = nowIso(this.ctx);
+      const msgId = newId('msg');
+      const attachments = this.saveImages(id, msgId, input.images);
       // Delivered right away when the agent can take it, like typing into Claude Code while it works.
       const steer = input.now ? undefined : this.steers.get(id);
-      if (steer && steer(message)) {
-        this.ctx.db.insert(conversationMessages).values({ id: newId('msg'), conversationId: id, role: 'user', content: message, status: 'steered', createdAt: ts, finishedAt: ts }).run();
+      if (steer && steer(message, this.agentImages(id, attachments))) {
+        this.ctx.db.insert(conversationMessages).values({ id: msgId, conversationId: id, role: 'user', content: message, status: 'steered', attachments, createdAt: ts, finishedAt: ts }).run();
         this.touch(id);
         return this.detail(id);
       }
-      this.ctx.db.insert(conversationMessages).values({ id: newId('msg'), conversationId: id, role: 'user', content: message, status: 'queued', createdAt: ts }).run();
+      this.ctx.db.insert(conversationMessages).values({ id: msgId, conversationId: id, role: 'user', content: message, status: 'queued', attachments, createdAt: ts }).run();
       this.touch(id);
       if (input.now) this.running.get(id)?.abort();
       return this.detail(id);
     }
-    this.ask(id, message);
+    this.ask(id, message, undefined, input.images);
     return this.detail(id);
+  }
+
+  /** An attached image's file, for the dashboard: only files recorded on this conversation's messages. */
+  attachment(id: string, file: string): { path: string; mediaType: string } {
+    this.row(id);
+    const hit = /^[A-Za-z0-9_-]+\.(png|jpg|gif|webp)$/.test(file)
+      ? this.ctx.db
+          .select()
+          .from(conversationMessages)
+          .where(eq(conversationMessages.conversationId, id))
+          .all()
+          .flatMap((m) => m.attachments ?? [])
+          .find((a) => a.file === file)
+      : undefined;
+    if (!hit) throw new OrbitError('NOT_FOUND', 'Image not found.');
+    return { path: path.join(this.ctx.paths.uploads, id, hit.file), mediaType: hit.mediaType };
   }
 
   /** Takes back a queued message before it is sent. */
@@ -165,7 +205,7 @@ export class ChatService {
   }
 
   /** Changes a session's AI, mode or projects; the next message uses them. */
-  update(id: string, patch: { provider?: Provider; mode?: SessionMode; repoIds?: string[]; title?: string; permissionMode?: SessionPermissionMode; model?: string | null }): ConversationSummaryDTO {
+  update(id: string, patch: { provider?: Provider; mode?: SessionMode; repoIds?: string[]; title?: string; permissionMode?: SessionPermissionMode; model?: string | null; effort?: EffortLevel | null }): ConversationSummaryDTO {
     const row = this.row(id);
     const set: Partial<ConversationRow> = {};
     const repoIds = patch.repoIds ? this.validRepoIds(patch.repoIds) : row.repoIds;
@@ -174,6 +214,7 @@ export class ChatService {
     if (patch.mode && patch.mode !== row.mode) set.mode = this.allowedMode(patch.mode, repoIds);
     if (patch.title?.trim()) set.title = truncate(patch.title.trim(), 120);
     if (patch.model !== undefined && cleanModel(patch.model) !== row.model) set.model = cleanModel(patch.model);
+    if (patch.effort !== undefined && (patch.effort ?? null) !== row.effort) set.effort = patch.effort ?? null;
     if (patch.permissionMode && patch.permissionMode !== row.permissionMode) {
       set.permissionMode = patch.permissionMode;
       audit(this.ctx, { actor: 'user', action: 'session.permission_mode', target: id, summary: `Commands in a working session: ${patch.permissionMode === 'auto' ? 'auto (safety-checked)' : 'ask first'}` });
@@ -227,15 +268,34 @@ export class ChatService {
     return this.send(id, { message: 'You can now run commands without asking (a safety check still blocks risky ones). Continue where you left off.', permissionMode: 'auto' });
   }
 
+  /** Answers what the agent is waiting on (see `requestApproval`). */
+  approve(id: string, decision: 'accept' | 'acceptForSession' | 'decline'): ConversationDetailDTO {
+    this.row(id);
+    const list = this.approvals.get(id);
+    const next = list?.shift();
+    if (!list || !next) throw new OrbitError('CONFLICT', 'The agent is no longer waiting for an answer.');
+    if (!list.length) this.approvals.delete(id);
+    const label = next.dto.command ?? 'a file change outside its sandbox';
+    const allowed = decision !== 'decline';
+    audit(this.ctx, { actor: 'user', action: allowed ? 'session.approve' : 'session.decline', target: id, summary: `${allowed ? 'Allowed' : 'Declined'} in a working session: ${truncate(label, 200)}` });
+    this.event(id, next.messageId, { kind: 'agent', actor: 'assistant', title: `${allowed ? 'You allowed' : 'You declined'}: ${truncate(label, 160)}`, data: { runId: next.runId } });
+    next.resolve(decision);
+    this.ctx.bus.publish({ type: 'chat.updated', conversationId: id });
+    return this.detail(id);
+  }
+
   cancel(id: string): void {
     this.row(id);
+    this.dropApprovals(id);
     this.running.get(id)?.abort();
   }
 
   remove(id: string): void {
     this.row(id);
+    this.dropApprovals(id);
     this.running.get(id)?.abort();
     this.ctx.db.delete(conversations).where(eq(conversations.id, id)).run();
+    rmSync(path.join(this.ctx.paths.uploads, id), { recursive: true, force: true });
     this.ctx.bus.publish({ type: 'chat.updated', conversationId: id });
   }
 
@@ -255,6 +315,7 @@ export class ChatService {
 
   /** Stops every running session (Orbit is shutting down). */
   stopAll(): void {
+    for (const id of [...this.approvals.keys()]) this.dropApprovals(id);
     for (const c of this.running.values()) c.abort();
   }
 
@@ -274,10 +335,11 @@ export class ChatService {
   // ---------------------------------------------------------------------------
 
   /** Stores the visible message and starts the agent on it (`prompt` overrides what the agent receives). */
-  private ask(conversationId: string, message: string, prompt?: string): void {
+  private ask(conversationId: string, message: string, prompt?: string, images?: ChatImageInput[]): void {
     const ts = nowIso(this.ctx);
     const userId = newId('msg');
-    this.ctx.db.insert(conversationMessages).values({ id: userId, conversationId, role: 'user', content: message, status: 'done', createdAt: ts, finishedAt: ts }).run();
+    const attachments = this.saveImages(conversationId, userId, images);
+    this.ctx.db.insert(conversationMessages).values({ id: userId, conversationId, role: 'user', content: message, status: 'done', attachments, createdAt: ts, finishedAt: ts }).run();
     this.startTurn(conversationId, prompt ?? message, [userId]);
   }
 
@@ -328,10 +390,11 @@ export class ChatService {
       .filter((m) => (m.status === 'done' || m.status === 'steered') && m.id !== messageId && !userIds.includes(m.id))
       .map((m) => ({ role: m.role, content: m.content }));
 
-    let result = await this.turn(conv, messageId, withModel(plan.primary, conv.model), projects, message, history, signal);
+    const images = this.imagesFor(conversationId, userIds);
+    let result = await this.turn(conv, messageId, withModel(plan.primary, conv.model, conv.effort), projects, message, history, signal, images);
     if (result.status === 'rate_limited' && plan.fallback) {
       this.event(conversationId, messageId, { kind: 'note', actor: 'system', title: `${plan.primary.label} hit its usage limit. Switching to ${plan.fallback.label}.`, detail: result.error, data: null });
-      result = await this.turn(this.row(conversationId), messageId, withModel(plan.fallback, conv.model), projects, message, history, signal);
+      result = await this.turn(this.row(conversationId), messageId, withModel(plan.fallback, conv.model, conv.effort), projects, message, history, signal, images);
     }
 
     const blocked = this.blockedFrom(result, this.row(conversationId));
@@ -368,13 +431,14 @@ export class ChatService {
     message: string,
     history: { role: 'user' | 'assistant'; content: string }[],
     signal: AbortSignal,
+    images: AgentImage[],
   ): Promise<AgentRunResult> {
     const resumeId = seat.runtime.resumable && conv.agentRuntime === seat.runtime.id ? conv.agentSessionId : null;
-    let result = await this.runOnce(conv, messageId, seat, projects, message, history, resumeId, signal);
+    let result = await this.runOnce(conv, messageId, seat, projects, message, history, resumeId, signal, images);
     // A session can disappear (cleared by the CLI, another machine): start fresh with the history instead.
     if (resumeId && result.status === 'failed' && !result.numTurns && !signal.aborted) {
       this.event(conv.id, messageId, { kind: 'note', actor: 'system', title: 'Could not continue the previous session, so the agent starts a fresh one with the conversation so far.', detail: result.error, data: null });
-      result = await this.runOnce(conv, messageId, seat, projects, message, history, null, signal);
+      result = await this.runOnce(conv, messageId, seat, projects, message, history, null, signal, images);
     }
     if (seat.runtime.resumable && result.sessionId) {
       this.ctx.db.update(conversations).set({ agentSessionId: result.sessionId, agentRuntime: seat.runtime.id }).where(eq(conversations.id, conv.id)).run();
@@ -391,6 +455,7 @@ export class ChatService {
     history: { role: 'user' | 'assistant'; content: string }[],
     resumeId: string | null,
     signal: AbortSignal,
+    images: AgentImage[],
   ): Promise<AgentRunResult> {
     const settings = this.ctx.settings.get();
     const briefs: AssistantProject[] = projects.map((p) => ({
@@ -417,6 +482,7 @@ export class ChatService {
       session: { resumeId, persist: true },
       // The developer's own sessions: their skills (design skills included) and user settings load.
       userEnvironment: true,
+      ...(images.length ? { images } : {}),
     };
     const request: AgentRunRequest = edit
       ? {
@@ -434,6 +500,8 @@ export class ChatService {
             mode: conv.permissionMode === 'auto' ? 'auto' : 'allowlist',
             allowed: [...new Set([...this.projectCommands(primary!), ...conv.allowedCommands])],
           },
+          // The developer's own project: the agent commits and pushes when asked, like Claude Code.
+          allowGit: true,
         }
       : conv.seat === 'security'
         ? {
@@ -473,8 +541,10 @@ export class ChatService {
         else this.steers.delete(conv.id);
         this.ctx.bus.publish({ type: 'chat.updated', conversationId: conv.id });
       },
+      ...(edit ? { onApproval: (a: ApprovalRequest) => this.requestApproval(conv.id, messageId, runId, a) } : {}),
     });
     this.steers.delete(conv.id);
+    this.dropApprovals(conv.id);
     if (result.status === 'rate_limited' || result.status === 'failed') {
       forgetResolvedRuntime(this.ctx);
       forgetCodexAvailability(this.ctx);
@@ -488,6 +558,63 @@ export class ChatService {
       data: { runId, phase: 'end', status, numTurns: result.numTurns },
     });
     return result;
+  }
+
+  /**
+   * The agent asks, mid-answer, to run something its sandbox blocks (Codex: a commit, a push,
+   * a download). Orbit's hard rules always apply. In Auto-accept the rest runs on its own;
+   * in Ask first the developer answers in the session (`approve`).
+   */
+  private requestApproval(conversationId: string, messageId: string, runId: string, a: ApprovalRequest): Promise<ApprovalDecision> {
+    const row = this.row(conversationId);
+    const label = a.command ?? 'a file change outside its sandbox';
+    const denied = a.command ? deniedCommandReason(a.command, { allowGit: true }) : null;
+    if (denied) {
+      this.event(conversationId, messageId, { kind: 'agent', actor: 'assistant', title: `Blocked: ${truncate(label, 160)}. ${denied}`, data: { runId } });
+      return Promise.resolve('decline');
+    }
+    if (row.permissionMode === 'auto' || (a.command && row.allowedCommands.includes(a.command))) {
+      this.event(conversationId, messageId, { kind: 'agent', actor: 'assistant', title: `Auto-accepted: ${truncate(label, 160)}`, data: { runId } });
+      return Promise.resolve('accept');
+    }
+    return new Promise((resolve) => {
+      const dto: SessionApprovalDTO = { id: newId('apr'), kind: a.kind, command: a.command, reason: a.reason, network: a.network, createdAt: nowIso(this.ctx) };
+      this.approvals.set(conversationId, [...(this.approvals.get(conversationId) ?? []), { dto, messageId, runId, resolve }]);
+      this.ctx.bus.publish({ type: 'chat.updated', conversationId });
+    });
+  }
+
+  /** Answers every open request with `cancel` (the answer stopped or the session is going away). */
+  private dropApprovals(conversationId: string): void {
+    const list = this.approvals.get(conversationId);
+    if (!list) return;
+    this.approvals.delete(conversationId);
+    for (const p of list) p.resolve('cancel');
+    this.ctx.bus.publish({ type: 'chat.updated', conversationId });
+  }
+
+  /** Saves a message's images in the conversation's upload folder (after checking them). */
+  private saveImages(conversationId: string, messageId: string, images: ChatImageInput[] | undefined): StoredAttachment[] | null {
+    const decoded = decodeImages(images);
+    if (!decoded.length) return null;
+    const dir = path.join(this.ctx.paths.uploads, conversationId);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    return decoded.map(({ input, bytes }, i) => {
+      const file = `${messageId}-${i + 1}.${IMAGE_EXT[input.mediaType]}`;
+      writeFileSync(path.join(dir, file), bytes, { mode: 0o600 });
+      return { id: newId('img'), name: input.name.replace(/[^\w .-]+/g, '').trim().slice(0, 80) || `image-${i + 1}`, mediaType: input.mediaType, size: bytes.length, file };
+    });
+  }
+
+  private agentImages(conversationId: string, attachments: StoredAttachment[] | null | undefined): AgentImage[] {
+    return (attachments ?? []).map((a) => ({ path: path.join(this.ctx.paths.uploads, conversationId, a.file), mediaType: a.mediaType }));
+  }
+
+  /** The images attached to the messages an answer is for, in order. */
+  private imagesFor(conversationId: string, messageIds: string[]): AgentImage[] {
+    if (!messageIds.length) return [];
+    const rows = this.ctx.db.select().from(conversationMessages).where(inArray(conversationMessages.id, messageIds)).orderBy(asc(conversationMessages.createdAt)).all();
+    return rows.flatMap((m) => this.agentImages(conversationId, m.attachments));
   }
 
   /** Commands a working session may run without asking: the project's own setup and check commands. */
@@ -605,15 +732,45 @@ export class ChatService {
       allowedCommands: row.allowedCommands,
       permissionMode: row.permissionMode,
       model: row.model,
+      effort: row.effort ?? null,
       lastMessage: last ? truncate(last.content.replace(/\s+/g, ' '), 140) : null,
       running,
       lastStatus: lastAgent?.status ?? null,
       steerable: this.steers.has(row.id),
-      needsYou: !running && !!lastAgent?.blocked?.some((b) => b.allowable && !row.allowedCommands.includes(b.command)),
+      needsYou: this.approvals.has(row.id) || (!running && !!lastAgent?.blocked?.some((b) => b.allowable && !row.allowedCommands.includes(b.command))),
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     };
   }
+}
+
+const IMAGE_EXT: Record<ChatImageType, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
+
+/** The file's own first bytes must say it is the image type it claims to be. */
+function looksLike(type: ChatImageType, b: Buffer): boolean {
+  switch (type) {
+    case 'image/png':
+      return b.length > 8 && b[0] === 0x89 && b.toString('latin1', 1, 4) === 'PNG';
+    case 'image/jpeg':
+      return b.length > 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff;
+    case 'image/gif':
+      return b.toString('latin1', 0, 4) === 'GIF8';
+    case 'image/webp':
+      return b.toString('latin1', 0, 4) === 'RIFF' && b.toString('latin1', 8, 12) === 'WEBP';
+  }
+}
+
+/** Checks attached images (type, size, real image bytes) and decodes them. */
+function decodeImages(images: ChatImageInput[] | undefined): { input: ChatImageInput; bytes: Buffer }[] {
+  if (!images?.length) return [];
+  if (images.length > CHAT_IMAGE_LIMITS.maxImages) throw new OrbitError('VALIDATION', `Attach at most ${CHAT_IMAGE_LIMITS.maxImages} images to one message.`);
+  return images.map((input) => {
+    if (!(CHAT_IMAGE_TYPES as readonly string[]).includes(input.mediaType)) throw new OrbitError('VALIDATION', 'Only PNG, JPEG, GIF and WebP images can be attached.');
+    const bytes = Buffer.from(input.data, 'base64');
+    if (!bytes.length || bytes.length > CHAT_IMAGE_LIMITS.maxBytes) throw new OrbitError('VALIDATION', 'Each image must be smaller than 5 MB.');
+    if (!looksLike(input.mediaType, bytes)) throw new OrbitError('VALIDATION', 'That file is not the image type it claims to be.');
+    return { input, bytes };
+  });
 }
 
 function cleanModel(model: string | null | undefined): string | null {
@@ -621,12 +778,17 @@ function cleanModel(model: string | null | undefined): string | null {
   return m ? m.slice(0, 120) : null;
 }
 
-/** A session's own model applies only to the AI it belongs to (a Claude model never goes to Codex). */
-function withModel(seat: SeatCandidate, model: string | null): SeatCandidate {
-  if (!model) return seat;
+/**
+ * A session's own model applies only to the AI it belongs to (a Claude model never goes to
+ * Codex). Its own effort applies to either AI: both take the same levels.
+ */
+function withModel(seat: SeatCandidate, model: string | null, effort: EffortLevel | null = null): SeatCandidate {
+  if (seat.provider === 'scripted') return seat;
+  const out = effort ? { ...seat, effort } : seat;
+  if (!model) return out;
   const forClaude = model.startsWith('claude-');
-  if ((seat.provider === 'claude') !== forClaude || seat.provider === 'scripted') return seat;
-  return { ...seat, model };
+  if ((seat.provider === 'claude') !== forClaude) return out;
+  return { ...out, model };
 }
 
 function titleFrom(message: string): string {
@@ -646,6 +808,7 @@ function toMessageDTO(m: ConversationMessageRow): ChatMessageDTO {
     error: m.error,
     suggestion: m.suggestion ?? null,
     blocked: m.blocked ?? [],
+    attachments: (m.attachments ?? []).map((a) => ({ id: a.id, name: a.name, mediaType: a.mediaType, size: a.size, url: `/api/chats/${m.conversationId}/attachments/${a.file}` })),
     durationMs: m.durationMs,
     createdAt: m.createdAt,
     finishedAt: m.finishedAt,

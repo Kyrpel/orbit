@@ -1,8 +1,9 @@
-import { Activity, Bot, FolderGit2, LayoutGrid, MoreHorizontal, Plug, Rocket, Settings2 } from 'lucide-react';
+import { Activity, Bot, FolderGit2, LayoutGrid, MoreHorizontal, Plug, Puzzle, Rocket, Settings2, SquareTerminal, Sun } from 'lucide-react';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { NavLink, useLocation } from 'react-router';
 import { useOverview } from '../lib/api';
 import { useNewVersion } from '../lib/new-version';
+import { setTheme, useTheme, type Theme } from '../lib/theme';
 import { cn } from '../lib/utils';
 import { Toaster } from './ui';
 
@@ -23,6 +24,7 @@ const MAIN = [
   { to: '/', label: 'Workspace', icon: LayoutGrid, end: true, match: (p: string) => p === '/' || p.startsWith('/s/') },
   { to: '/autopilot', label: 'Autopilot', icon: Rocket, end: false, match: (p: string) => p.startsWith('/autopilot') || p.startsWith('/missions') },
   { to: '/agents', label: 'Agents', icon: Bot, end: false, match: (p: string) => p.startsWith('/agents') },
+  { to: '/skills', label: 'Skills', icon: Puzzle, end: false, match: (p: string) => p.startsWith('/skills') },
   { to: '/projects', label: 'Projects', icon: FolderGit2, end: false, match: (p: string) => p.startsWith('/projects') },
   { to: '/settings', label: 'Settings', icon: Settings2, end: false, match: (p: string) => p.startsWith('/settings') },
 ];
@@ -68,6 +70,29 @@ function MoreMenu() {
           ))}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/** Terminal (dark, like Claude Code) or Light. */
+function ThemeSwitch() {
+  const theme = useTheme();
+  const opt = (v: Theme, label: string, Icon: typeof Sun, hint: string) => (
+    <button
+      type="button"
+      onClick={() => setTheme(v)}
+      aria-pressed={theme === v}
+      title={hint}
+      className={cn('flex h-7 items-center gap-1.5 rounded-[6px] px-2 text-xs transition-colors', theme === v ? 'bg-hull font-[600] text-chalk shadow-[0_1px_2px_rgb(16_24_40/0.12)]' : 'text-dust hover:text-chalk')}
+    >
+      <Icon className="size-3.5" aria-hidden />
+      <span className="hidden xl:inline">{label}</span>
+    </button>
+  );
+  return (
+    <div className="flex shrink-0 items-center gap-0.5 rounded-[8px] bg-hull-3 p-0.5" role="group" aria-label="Look">
+      {opt('terminal', 'Terminal', SquareTerminal, 'Dark, like Claude Code in a terminal')}
+      {opt('light', 'Light', Sun, 'White and friendly')}
     </div>
   );
 }
@@ -119,10 +144,11 @@ export function Shell({ children, live }: { children: ReactNode; live: 'connecti
             );
           })}
         </nav>
-        <span className="hidden items-center gap-2 text-2xs text-dust lg:flex" title="Orbit runs on this computer only">
+        <span className="hidden items-center gap-2 text-2xs text-dust 2xl:flex" title="Orbit runs on this computer only">
           <span className={cn('size-2 rounded-full', live === 'live' ? 'bg-go' : live === 'connecting' ? 'bg-signal' : 'bg-fault')} aria-hidden />
           {live === 'live' ? 'Running on this computer' : live === 'connecting' ? 'Connecting…' : 'Offline: is Orbit still running?'}
         </span>
+        <ThemeSwitch />
         <MoreMenu />
       </header>
       {fullBleed ? (

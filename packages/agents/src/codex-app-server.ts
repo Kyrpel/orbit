@@ -1,9 +1,10 @@
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { execa } from 'execa';
-import { redactSecrets, type AgentPlanItem } from '@orbit/shared';
-import { emptyResult, isUsageLimitError, type AgentEvent, type AgentRunContext, type AgentRunRequest, type AgentRunResult, type AgentRunStatus } from './runtime';
-import { unwrapShellCommand } from './codex-cli';
+import { redactSecrets, type AgentPlanItem, type StepOutput } from '@orbit/shared';
+import { emptyResult, isUsageLimitError, type AgentEvent, type AgentImage, type AgentRunContext, type AgentRunRequest, type AgentRunResult, type AgentRunStatus } from './runtime';
+import { shellName, unwrapShellCommand } from './codex-cli';
+import { addedFile, outputPreview, unifiedDiff } from './output';
 
 /**
  * Working sessions on Codex through its app-server (JSON-RPC over stdio) instead of
@@ -25,7 +26,7 @@ type Item = {
   exitCode?: number | null;
   status?: string;
   aggregatedOutput?: string | null;
-  changes?: { path: string; kind?: { type?: string } | string }[];
+  changes?: { path: string; kind?: { type?: string } | string; diff?: string }[];
   query?: string;
   server?: string;
   tool?: string;
@@ -37,6 +38,18 @@ function shortPath(p: string, cwd: string): string {
   return p.split(/[\\/]+/).slice(-2).join('/');
 }
 
+/** A Codex user message: the text, then any attached images as local files. Exported for tests. */
+export function codexInput(text: string, images?: AgentImage[]): Json[] {
+  return [{ type: 'text', text }, ...(images ?? []).map((i) => ({ type: 'localImage', path: i.path }))];
+}
+
+/** A Codex file change's diff: a unified diff for edits, the content itself for new files. */
+function codexDiff(kind: string | undefined, diff: string): StepOutput | undefined {
+  if (kind === 'delete') return undefined;
+  if (kind === 'add' && !/^(@@|--- |\+\+\+ )/m.test(diff)) return addedFile(diff);
+  return unifiedDiff(diff);
+}
+
 /** Maps app-server notifications onto Orbit's live steps. Exported for tests. */
 export function translateAppServerNotification(method: string, params: Json, cwd: string, onEvent: (e: AgentEvent) => void): void {
   const item = (params.item ?? {}) as Item;
@@ -44,12 +57,13 @@ export function translateAppServerNotification(method: string, params: Json, cwd
   if (method === 'item/started') {
     if (item.type === 'commandExecution' && item.command) {
       const cmd = redactSecrets(unwrapShellCommand(item.command));
-      onEvent({ type: 'tool', tool: 'Bash', id, summary: `Run ${cmd.slice(0, 140)}`, step: 'run', target: cmd.slice(0, 300) });
+      onEvent({ type: 'tool', tool: shellName(item.command), id, summary: `Run ${cmd.slice(0, 140)}`, step: 'run', target: cmd.slice(0, 300) });
     } else if (item.type === 'fileChange' && item.changes?.length) {
       for (const c of item.changes) {
         const kind = typeof c.kind === 'string' ? c.kind : c.kind?.type;
         const verb = kind === 'add' ? 'Write' : kind === 'delete' ? 'Delete' : 'Edit';
-        onEvent({ type: 'tool', tool: verb === 'Write' ? 'Write' : 'Edit', id, summary: `${verb} ${path.basename(c.path)}`, step: 'edit', target: shortPath(c.path, cwd) });
+        const output = c.diff ? codexDiff(kind, c.diff) : undefined;
+        onEvent({ type: 'tool', tool: verb === 'Write' ? 'Write' : 'Edit', id, summary: `${verb} ${path.basename(c.path)}`, step: 'edit', target: shortPath(c.path, cwd), ...(output ? { output } : {}) });
       }
     } else if (item.type === 'webSearch') {
       onEvent({ type: 'tool', tool: 'WebSearch', id, summary: `Search the web for ${JSON.stringify(item.query ?? '').slice(0, 80)}`, step: 'web', target: item.query ?? null });
@@ -63,6 +77,8 @@ export function translateAppServerNotification(method: string, params: Json, cwd
     else if (item.type === 'commandExecution' && (item.status === 'failed' || (item.exitCode != null && item.exitCode !== 0))) {
       const out = redactSecrets(String(item.aggregatedOutput ?? '').slice(-1500));
       onEvent({ type: 'tool_result', isError: true, id, summary: `Exit code ${item.exitCode ?? '?'}${out ? `\n${out}` : ''}` });
+    } else if (item.type === 'commandExecution') {
+      onEvent({ type: 'tool_result', isError: false, id, summary: '', output: outputPreview(String(item.aggregatedOutput ?? '')) });
     } else if (item.type === 'fileChange' && item.status === 'failed') {
       onEvent({ type: 'tool_result', isError: true, id, summary: 'The file change was not applied.' });
     }
@@ -117,6 +133,28 @@ export async function runCodexAppServer(opts: { bin: string; env: Record<string,
       send({ id, method, params });
     });
 
+  /**
+   * Requests from Codex. Approvals (a command or file change its sandbox blocks) go to the
+   * caller, which asks the developer or applies Orbit's rules; without a caller they are refused.
+   */
+  const answerRequest = async (id: number, method: string, params: Json) => {
+    const isCommand = method === 'item/commandExecution/requestApproval';
+    if ((isCommand || method === 'item/fileChange/requestApproval') && ctx.onApproval) {
+      const raw = isCommand && typeof params.command === 'string' ? params.command : null;
+      const decision = await ctx
+        .onApproval({
+          kind: isCommand ? 'command' : 'file',
+          command: raw ? redactSecrets(unwrapShellCommand(raw)) : null,
+          reason: typeof params.reason === 'string' && params.reason ? redactSecrets(params.reason).slice(0, 500) : null,
+          network: !!params.networkApprovalContext,
+        })
+        .catch(() => 'decline' as const);
+      send({ id, result: { decision } });
+      return;
+    }
+    send({ id, error: { code: -32601, message: 'Orbit does not approve actions outside the sandbox.' } });
+  };
+
   let threadId: string | null = null;
   let turnId: string | null = null;
   let turnOpen = false;
@@ -150,16 +188,15 @@ export async function runCodexAppServer(opts: { bin: string; env: Record<string,
     const method = typeof m.method === 'string' ? m.method : '';
     const params = (m.params ?? {}) as Json;
     if (id != null && method) {
-      // A request from Codex (an approval): Orbit never approves anything outside the sandbox.
-      send({ id, error: { code: -32601, message: 'Orbit does not approve actions outside the sandbox.' } });
+      void answerRequest(id, method, params);
       return;
     }
     if (method === 'turn/started') {
       turnId = String(((params.turn ?? {}) as Json).id ?? '') || turnId;
       turnOpen = true;
-      ctx.onSteerReady?.((message) => {
+      ctx.onSteerReady?.((message, images) => {
         if (!turnOpen || !threadId || !turnId) return false;
-        call('turn/steer', { threadId, expectedTurnId: turnId, input: [{ type: 'text', text: message }] }).catch(() => {
+        call('turn/steer', { threadId, expectedTurnId: turnId, input: codexInput(message, images) }).catch(() => {
           ctx.onEvent({ type: 'status', message: 'A message arrived just as Codex finished, so it was not read. Send it again.' });
         });
         return true;
@@ -199,14 +236,17 @@ export async function runCodexAppServer(opts: { bin: string; env: Record<string,
     await call('initialize', { clientInfo: { name: 'orbit', title: 'Orbit', version: '0.1.0' } });
     send({ method: 'initialized' });
     const instructions = `${req.systemAppend}${req.readRoots.length ? `\n\nYou may also read (never modify) these directories:\n${req.readRoots.map((r) => `- ${r}`).join('\n')}` : ''}`;
-    const threadParams = { cwd: req.cwd, sandbox, approvalPolicy: 'never', developerInstructions: instructions, ...(req.model ? { model: req.model } : {}) };
+    // With a caller that can answer, Codex may ask to run what its sandbox blocks (a commit,
+    // a push) instead of failing; the sandbox still applies to everything else.
+    const approvalPolicy = ctx.onApproval && req.access === 'workspace-write' ? 'on-request' : 'never';
+    const threadParams = { cwd: req.cwd, sandbox, approvalPolicy, developerInstructions: instructions, ...(req.model ? { model: req.model } : {}) };
     const resumeId = req.session?.resumeId;
     const thread = resumeId
       ? await call('thread/resume', { threadId: resumeId, ...threadParams, excludeTurns: true })
       : await call('thread/start', { ...threadParams, ephemeral: !req.session?.persist });
     threadId = String(((thread.thread ?? {}) as Json).id ?? resumeId ?? '');
     ctx.onEvent({ type: 'status', message: `Session ${resumeId ? 'continued' : 'started'}${req.model ? ` (${req.model})` : ' (Codex default model)'}` });
-    await call('turn/start', { threadId, input: [{ type: 'text', text: req.prompt }], ...(req.effort ? { effort: req.effort } : {}) });
+    await call('turn/start', { threadId, input: codexInput(req.prompt, req.images), ...(req.effort ? { effort: req.effort } : {}) });
     await done;
   } catch (err) {
     turnError = turnError ?? (err as Error).message;

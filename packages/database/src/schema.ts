@@ -396,6 +396,8 @@ export const conversations = sqliteTable(
     permissionMode: text('permission_mode').$type<'ask' | 'auto'>().notNull().default('ask'),
     /** This session's own model (overrides the session agent's model for that AI); null = default. */
     model: text('model'),
+    /** This session's own reasoning effort; null = the session agent's effort. */
+    effort: text('effort').$type<'low' | 'medium' | 'high' | 'xhigh' | 'max'>(),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -417,6 +419,8 @@ export const conversationMessages = sqliteTable(
     error: text('error'),
     suggestion: text('suggestion', { mode: 'json' }).$type<MissionSuggestion | null>(),
     blocked: text('blocked', { mode: 'json' }).$type<BlockedCommand[] | null>(),
+    /** Images attached to a user message; the files live in ORBIT_HOME/uploads/<conversation>/. */
+    attachments: text('attachments', { mode: 'json' }).$type<StoredAttachment[] | null>(),
     durationMs: integer('duration_ms'),
     createdAt: createdAt(),
     finishedAt: text('finished_at'),
@@ -441,6 +445,15 @@ export const conversationEvents = sqliteTable(
   },
   (t) => [index('conversation_events_conv').on(t.conversationId, t.id)],
 );
+
+/** An attached image as stored: `file` is its name inside the conversation's upload folder. */
+export interface StoredAttachment {
+  id: string;
+  name: string;
+  mediaType: string;
+  size: number;
+  file: string;
+}
 
 export type ConversationRow = typeof conversations.$inferSelect;
 export type ConversationMessageRow = typeof conversationMessages.$inferSelect;

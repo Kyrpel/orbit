@@ -1,5 +1,6 @@
 import { redactSecrets } from '@orbit/shared';
 import type { AgentEvent } from './runtime';
+import { editPreview, resultPreview } from './output';
 import { describeToolCall } from './summarize';
 
 type Block = { type: string; text?: string; id?: string; name?: string; input?: unknown; tool_use_id?: string; is_error?: boolean; content?: unknown };
@@ -30,6 +31,7 @@ export function emitAssistantContent(content: unknown, onEvent: (e: AgentEvent) 
     } else if (block.type === 'tool_use' && block.name) {
       if (calls && block.id) calls.set(block.id, { name: block.name, input: block.input });
       const d = describeToolCall(block.name, block.input);
+      const output = editPreview(block.name, block.input);
       onEvent({
         type: 'tool',
         tool: block.name,
@@ -38,6 +40,7 @@ export function emitAssistantContent(content: unknown, onEvent: (e: AgentEvent) 
         step: d.step,
         target: d.target == null ? null : redactSecrets(d.target),
         plan: d.plan?.map((p) => ({ ...p, text: redactSecrets(p.text) })),
+        ...(output ? { output } : {}),
       });
     }
   }
@@ -45,14 +48,19 @@ export function emitAssistantContent(content: unknown, onEvent: (e: AgentEvent) 
 }
 
 /**
- * Reports failed tool results from a Claude `user` message. Successful results
- * are not reported: a step counts as done once the agent moves on, which keeps
- * the event log at one row per step.
+ * Reports tool results from a Claude `user` message: failures with their error, and
+ * successes as a short preview (the terminal view's `⎿` line) when the call is known.
  */
 export function emitToolResults(content: unknown, onEvent: (e: AgentEvent) => void, opts: { detectDenied: boolean; calls?: ToolCallLog }): void {
   if (!Array.isArray(content)) return;
   for (const block of content as Block[]) {
-    if (block.type !== 'tool_result' || !block.is_error) continue;
+    if (block.type !== 'tool_result') continue;
+    if (!block.is_error) {
+      const call = block.tool_use_id ? opts.calls?.get(block.tool_use_id) : undefined;
+      const output = resultPreview(call?.name, block.content);
+      if (output) onEvent({ type: 'tool_result', isError: false, id: block.tool_use_id, summary: '', output });
+      continue;
+    }
     const t = typeof block.content === 'string' ? block.content : JSON.stringify(block.content ?? '');
     if (opts.detectDenied && PERMISSION_REFUSAL.test(t)) {
       const call = block.tool_use_id ? opts.calls?.get(block.tool_use_id) : undefined;

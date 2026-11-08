@@ -1,6 +1,7 @@
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { emptyResult, ScriptedRuntime, type AgentRunRequest, type AgentRunResult, type AgentRuntime } from '@orbit/agents';
+import { emptyResult, ScriptedRuntime, type AgentRunRequest, type AgentRunResult, type AgentRuntime, type ApprovalDecision, type AgentImage } from '@orbit/agents';
 import { createOrbit, MemorySecretStore, planSeat, silentLogger, type Orbit } from '../src';
 import { cleanup, makeOrbit, makeRepo, tempDir, USER, waitFor, type TestOrbit } from './helpers';
 
@@ -325,6 +326,123 @@ describe('working sessions (the workspace)', () => {
     return orbit.repos.get(repo.id);
   }
 
+  /** A runtime that asks for approval mid-answer, the way Codex asks to run what its sandbox blocks. */
+  function asking(commands: string[], decisions: ApprovalDecision[], calls?: AgentRunRequest[]): AgentRuntime {
+    return {
+      id: 'codex-cli',
+      displayName: 'Codex',
+      kind: 'ai',
+      resumable: true,
+      checkAvailability: async () => ({ available: true, reason: null, sandbox: 'unknown', details: {} }),
+      run: async (req, ctx) => {
+        calls?.push(req);
+        for (const command of commands) {
+          const d = ctx.onApproval ? await ctx.onApproval({ kind: 'command', command, reason: 'needs network', network: true }) : 'decline';
+          decisions.push(d);
+          if (d === 'cancel') return emptyResult({ status: 'cancelled', durationMs: 5 });
+        }
+        return emptyResult({ status: 'succeeded', durationMs: 5, numTurns: 1, sessionId: 'thread-1', text: 'Pushed.' });
+      },
+    };
+  }
+
+  it('lets the agent commit and push in a working session, asking you live in Ask first', async () => {
+    const decisions: ApprovalDecision[] = [];
+    const calls: AgentRunRequest[] = [];
+    const repo = await setup([asking(['git push origin main'], decisions, calls)]);
+    const s = orbit.chat.start({ message: 'Make it live', repoIds: [repo.id], mode: 'edit', provider: 'codex' });
+    await until(() => orbit.chat.detail(s.id).approval !== null);
+    expect(calls[0]?.allowGit).toBe(true);
+    expect(orbit.chat.detail(s.id)).toMatchObject({ running: true, needsYou: true, approval: { kind: 'command', command: 'git push origin main', network: true } });
+    expect(orbit.chat.list().find((c) => c.id === s.id)?.needsYou).toBe(true);
+
+    orbit.chat.approve(s.id, 'accept');
+    await until(() => !orbit.chat.isRunning(s.id));
+    expect(decisions).toEqual(['accept']);
+    const d = orbit.chat.detail(s.id);
+    expect(d.approval).toBeNull();
+    expect(d.messages.at(-1)).toMatchObject({ role: 'assistant', status: 'done', content: 'Pushed.' });
+    expect(d.events.some((e) => e.title === 'You allowed: git push origin main')).toBe(true);
+    expect(() => orbit.chat.approve(s.id, 'accept')).toThrow(/no longer waiting/);
+  });
+
+  it('auto-accepts in Auto-accept, but Orbit\'s hard rules still refuse force pushes', async () => {
+    const decisions: ApprovalDecision[] = [];
+    const repo = await setup([asking(['git commit -m "Ship it"', 'git push --force origin main'], decisions)]);
+    const s = orbit.chat.start({ message: 'Ship it', repoIds: [repo.id], mode: 'edit', provider: 'codex', permissionMode: 'auto' });
+    await until(() => !orbit.chat.isRunning(s.id));
+    expect(decisions).toEqual(['accept', 'decline']);
+    const titles = orbit.chat.detail(s.id).events.map((e) => e.title);
+    expect(titles).toContain('Auto-accepted: git commit -m "Ship it"');
+    expect(titles.some((t) => t.startsWith('Blocked: git push --force origin main'))).toBe(true);
+  });
+
+  it('cancels a pending request when you stop the agent', async () => {
+    const decisions: ApprovalDecision[] = [];
+    const repo = await setup([asking(['git push'], decisions)]);
+    const s = orbit.chat.start({ message: 'Push', repoIds: [repo.id], mode: 'edit', provider: 'codex' });
+    await until(() => orbit.chat.detail(s.id).approval !== null);
+    orbit.chat.cancel(s.id);
+    await until(() => !orbit.chat.isRunning(s.id));
+    expect(decisions).toEqual(['cancel']);
+    expect(orbit.chat.detail(s.id).approval).toBeNull();
+  });
+
+  it('keeps pasted images with the message, gives them to the agent and serves them back', async () => {
+    const calls: AgentRunRequest[] = [];
+    const repo = await setup([fake('claude-code-cli', { calls })]);
+    const png = { name: 'screenshot.png', mediaType: 'image/png' as const, data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==' };
+    const s = orbit.chat.start({ message: 'What is wrong in [Image #1]?', repoIds: [repo.id], mode: 'edit', images: [png] });
+    await until(() => !orbit.chat.isRunning(s.id));
+    const sent = calls[0]?.images ?? [];
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.mediaType).toBe('image/png');
+    expect(existsSync(sent[0]!.path)).toBe(true);
+    const shown = orbit.chat.detail(s.id).messages[0]!.attachments;
+    expect(shown).toEqual([expect.objectContaining({ name: 'screenshot.png', mediaType: 'image/png', size: 70 })]);
+    const file = shown[0]!.url.split('/').pop()!;
+    expect(orbit.chat.attachment(s.id, file).path).toBe(sent[0]!.path);
+    expect(() => orbit.chat.attachment(s.id, '../../secrets.json')).toThrow(/not found/i);
+
+    // A follow-up without images sends none; a fake image is refused before anything is stored.
+    orbit.chat.send(s.id, { message: 'Thanks' });
+    await until(() => calls.length === 2 && !orbit.chat.isRunning(s.id));
+    expect(calls[1]?.images).toBeUndefined();
+    expect(() => orbit.chat.send(s.id, { message: 'x', images: [{ name: 'a.png', mediaType: 'image/png', data: Buffer.from('not an image').toString('base64') }] })).toThrow(/not the image type/);
+    expect(orbit.chat.detail(s.id).messages).toHaveLength(4);
+
+    orbit.chat.remove(s.id);
+    expect(existsSync(sent[0]!.path)).toBe(false);
+  });
+
+  it('passes images sent mid-answer to the agent with the message', async () => {
+    const steered: { text: string; images?: AgentImage[] }[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const runtime: AgentRuntime = {
+      id: 'claude-code-cli',
+      displayName: 'Claude',
+      kind: 'ai',
+      resumable: true,
+      checkAvailability: async () => ({ available: true, reason: null, sandbox: 'unknown', details: {} }),
+      run: async (_req, ctx) => {
+        ctx.onSteerReady?.((text, images) => (steered.push({ text, images }), true));
+        await gate;
+        ctx.onSteerReady?.(null);
+        return emptyResult({ status: 'succeeded', durationMs: 5, numTurns: 1, sessionId: 's1', text: 'done' });
+      },
+    };
+    const repo = await setup([runtime]);
+    const s = orbit.chat.start({ message: 'Work', repoIds: [repo.id], mode: 'edit' });
+    await until(() => orbit.chat.detail(s.id).steerable);
+    orbit.chat.send(s.id, { message: 'Also look at [Image #1]', images: [{ name: 'b.png', mediaType: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==' }] });
+    expect(steered[0]?.text).toBe('Also look at [Image #1]');
+    expect(steered[0]?.images?.[0]?.path).toMatch(/\.png$/);
+    expect(orbit.chat.detail(s.id).messages.find((m) => m.status === 'steered')?.attachments).toHaveLength(1);
+    release();
+    await until(() => !orbit.chat.isRunning(s.id));
+  });
+
   it('edits directly in the project, with only approved commands, and resumes the session', async () => {
     const calls: AgentRunRequest[] = [];
     const repo = await setup([fake('claude-code-cli', { calls })]);
@@ -421,6 +539,25 @@ describe('working sessions (the workspace)', () => {
     orbit.chat.send(s.id, { message: 'Three' });
     await until(() => codexCalls.length === 2 && !orbit.chat.isRunning(s.id));
     expect(codexCalls[1]?.model).toBe('gpt-6-sol');
+  });
+
+  it('uses the effort picked for the session with either AI', async () => {
+    const claudeCalls: AgentRunRequest[] = [];
+    const codexCalls: AgentRunRequest[] = [];
+    const repo = await setup([fake('claude-code-cli', { calls: claudeCalls }), fake('codex-cli', { calls: codexCalls })]);
+    const s = orbit.chat.start({ message: 'One', repoIds: [repo.id], mode: 'edit' });
+    await until(() => !orbit.chat.isRunning(s.id));
+    expect(s.effort).toBeNull();
+    expect(claudeCalls[0]?.effort).toBe('high'); // the session agent's default
+    orbit.chat.update(s.id, { effort: 'max' });
+    orbit.chat.send(s.id, { message: 'Two' });
+    await until(() => claudeCalls.length === 2 && !orbit.chat.isRunning(s.id));
+    expect(claudeCalls[1]?.effort).toBe('max');
+    orbit.chat.send(s.id, { message: 'Three', provider: 'codex' });
+    await until(() => codexCalls.length === 1 && !orbit.chat.isRunning(s.id));
+    expect(codexCalls[0]?.effort).toBe('max');
+    orbit.chat.update(s.id, { effort: null });
+    expect(orbit.chat.detail(s.id).effort).toBeNull();
   });
 
   it('refuses to edit read-only projects and multi-project sessions', async () => {

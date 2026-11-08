@@ -18,6 +18,8 @@ import type {
   RepoDTO,
   Settings,
   SettingsPatch,
+  PluginDetailsDTO,
+  SkillsDTO,
   TeamDTO,
   WorkspaceDTO,
 } from '@orbit/shared';
@@ -82,6 +84,8 @@ export const keys = {
   chats: ['chats'] as const,
   chat: (id: string) => ['chat', id] as const,
   changes: (repoId: string) => ['changes', repoId] as const,
+  skills: (q: string, filter: string, limit: number) => ['skills', q, filter, limit] as const,
+  skillDetails: (id: string) => ['skill-details', id] as const,
   activity: ['activity'] as const,
   github: ['github-repos'] as const,
   receipt: (id: string) => ['receipt', id] as const,
@@ -125,6 +129,16 @@ export const useDoctor = () => useQuery({ queryKey: keys.doctor, queryFn: () => 
 export const useAgents = () => useQuery({ queryKey: keys.agents, queryFn: () => api<AgentRoleDTO[]>('/api/agents') });
 export const useTeam = () => useQuery({ queryKey: keys.team, queryFn: () => api<TeamDTO>('/api/team'), staleTime: 30_000 });
 export const useChats = () => useQuery({ queryKey: keys.chats, queryFn: () => api<ConversationSummaryDTO[]>('/api/chats') });
+export const useSkills = (q: string, filter = 'all', limit = 40, enabled = true) =>
+  useQuery({
+    queryKey: keys.skills(q, filter, limit),
+    queryFn: () => api<SkillsDTO>(`/api/skills?q=${encodeURIComponent(q)}&filter=${encodeURIComponent(filter)}&limit=${limit}`),
+    enabled,
+    staleTime: 60_000,
+    placeholderData: (prev) => prev,
+  });
+export const useSkillDetails = (id: string | null) =>
+  useQuery({ queryKey: keys.skillDetails(id ?? 'none'), queryFn: () => api<PluginDetailsDTO>(`/api/skills/details?id=${encodeURIComponent(id ?? '')}`), enabled: !!id, staleTime: 5 * 60_000, retry: false });
 export const useChanges = (repoId: string | null, enabled = true) =>
   useQuery({ queryKey: keys.changes(repoId ?? 'none'), queryFn: () => api<RepoChangesDTO>(`/api/repos/${repoId}/changes`), enabled: !!repoId && enabled, staleTime: 2_000 });
 export const useChat = (id: string | null) => useQuery({ queryKey: keys.chat(id ?? 'none'), queryFn: () => api<ConversationDetailDTO>(`/api/chats/${id}`), enabled: !!id });

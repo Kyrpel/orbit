@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,7 +7,10 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import { z, ZodError } from 'zod';
 import type { Orbit } from '@orbit/core';
 import {
+  CHAT_IMAGE_TYPES,
+  EFFORT_LEVELS,
   ENTRY_POINTS,
+  MAX_CHAT_MESSAGE,
   errorMessage,
   MISSION_STATES,
   ORBIT_VERSION,
@@ -70,7 +73,9 @@ const schemas = {
   cancel: z.object({ reason: z.string().max(2000).nullish() }),
   consent: z.object({ grant: z.boolean() }),
   chat: z.object({
-    message: z.string().min(1).max(20_000),
+    message: z.string().min(1).max(MAX_CHAT_MESSAGE),
+    /** Pasted or dropped images, base64 (about 5 MB each at most). */
+    images: z.array(z.object({ name: z.string().max(200), mediaType: z.enum(CHAT_IMAGE_TYPES), data: z.string().min(1).max(7_200_000) })).max(6).optional(),
     repoIds: z.array(z.string()).max(50).optional(),
     mode: z.enum(['edit', 'ask']).optional(),
     provider: z.enum(['auto', 'claude', 'codex']).optional(),
@@ -78,6 +83,7 @@ const schemas = {
     /** While the agent is busy: interrupt it and send this right away (otherwise it is queued). */
     now: z.boolean().optional(),
     model: z.string().max(120).nullish(),
+    effort: z.enum(EFFORT_LEVELS).nullish(),
   }),
   patchChat: z.object({
     provider: z.enum(['auto', 'claude', 'codex']).optional(),
@@ -85,8 +91,13 @@ const schemas = {
     title: z.string().max(200).optional(),
     permissionMode: z.enum(['ask', 'auto']).optional(),
     model: z.string().max(120).nullish(),
+    effort: z.enum(EFFORT_LEVELS).nullish(),
   }),
   allowCommand: z.object({ command: z.string().min(1).max(4000) }),
+  approveChat: z.object({ decision: z.enum(['accept', 'acceptForSession', 'decline']) }),
+  plugin: z.object({ id: z.string().min(3).max(300).regex(/^[\w.-]+@[\w.-]+$/, 'A plugin id looks like name@marketplace.') }),
+  pluginEnabled: z.object({ id: z.string().min(3).max(300).regex(/^[\w.-]+@[\w.-]+$/), enabled: z.boolean() }),
+  marketplace: z.object({ source: z.string().min(3).max(500) }),
   commit: z.object({ message: z.string().min(1).max(5000) }),
   applyTask: z.object({ title: z.string().min(1).max(500), description: z.string().max(60_000) }),
   improveText: z.object({ text: z.string().min(1).max(20_000), repoId: z.string().nullish() }),
@@ -183,10 +194,34 @@ export async function buildApp(orbit: Orbit, opts: AppOptions): Promise<FastifyI
 
   // Ask: conversations with the Assistant.
   app.get('/api/chats', async () => orbit.chat.list());
-  app.post('/api/chats', async (req, reply) => reply.code(201).send(orbit.chat.start(body(schemas.chat, req))));
+  // Messages may carry pasted images, so these two take larger bodies.
+  const withImages = { bodyLimit: 45 * 1024 * 1024 };
+  app.post('/api/chats', withImages, async (req, reply) => reply.code(201).send(orbit.chat.start(body(schemas.chat, req))));
   app.get('/api/chats/:id', async (req) => orbit.chat.detail((req.params as { id: string }).id));
-  app.post('/api/chats/:id/messages', async (req) => orbit.chat.send((req.params as { id: string }).id, body(schemas.chat, req)));
+  app.post('/api/chats/:id/messages', withImages, async (req) => orbit.chat.send((req.params as { id: string }).id, body(schemas.chat, req)));
+  // Skills: Claude Code's plugins, searched and installed from Orbit.
+  app.get('/api/skills', async (req) => {
+    const q = req.query as { q?: string; filter?: string; limit?: string };
+    return orbit.skills.list({ query: q.q?.slice(0, 200), filter: q.filter?.slice(0, 100), limit: q.limit ? Number(q.limit) : undefined });
+  });
+  app.get('/api/skills/details', async (req) => orbit.skills.details(schemas.plugin.parse(req.query ?? {}).id));
+  app.post('/api/skills/install', async (req) => orbit.skills.install(body(schemas.plugin, req).id));
+  app.post('/api/skills/uninstall', async (req) => orbit.skills.uninstall(body(schemas.plugin, req).id));
+  app.post('/api/skills/enabled', async (req) => {
+    const b = body(schemas.pluginEnabled, req);
+    return orbit.skills.setEnabled(b.id, b.enabled);
+  });
+  app.post('/api/skills/refresh', async () => orbit.skills.refresh());
+  app.post('/api/skills/marketplaces', async (req) => orbit.skills.addMarketplace(body(schemas.marketplace, req).source));
+  app.get('/api/chats/:id/attachments/:file', async (req, reply) => {
+    const { id, file } = req.params as { id: string; file: string };
+    const image = orbit.chat.attachment(id, file);
+    reply.header('Cache-Control', 'private, max-age=31536000, immutable');
+    reply.header('X-Content-Type-Options', 'nosniff');
+    return reply.type(image.mediaType).send(createReadStream(image.path));
+  });
   app.patch('/api/chats/:id', async (req) => orbit.chat.update((req.params as { id: string }).id, body(schemas.patchChat, req)));
+  app.post('/api/chats/:id/approval', async (req) => orbit.chat.approve((req.params as { id: string }).id, body(schemas.approveChat, req).decision));
   app.post('/api/chats/:id/allow', async (req) => orbit.chat.allow((req.params as { id: string }).id, body(schemas.allowCommand, req).command));
   app.post('/api/chats/:id/allow-all', async (req) => orbit.chat.allowAll((req.params as { id: string }).id));
   app.delete('/api/chats/:id/messages/:messageId', async (req) => {

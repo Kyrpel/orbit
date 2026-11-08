@@ -17,7 +17,8 @@ export type IdPrefix =
   | 'usr'
   | 'cmd'
   | 'chat'
-  | 'msg';
+  | 'msg'
+  | 'img';
 
 /** Random, URL-safe, lowercase id body. 256 is divisible by 32, so each character is uniform. */
 export function randomId(length = 10): string {

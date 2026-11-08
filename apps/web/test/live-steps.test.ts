@@ -98,3 +98,37 @@ describe('buildLiveModel', () => {
     expect(run.steps[0]).toMatchObject({ kind: 'blocked', status: 'failed', object: 'npm install x' });
   });
 });
+
+describe('step results for the terminal view', () => {
+  it('attaches outputs to their steps, keeps edit diffs, and can keep to-do updates as steps', () => {
+    const events = [
+      ev({ kind: 'agent', actor: 'assistant', title: 'Agent started', data: { runId: 'r9', phase: 'start', runtime: 'claude-code-cli', model: null } }),
+      ev({ kind: 'tool', actor: 'assistant', title: 'Run npm test', data: { runId: 'r9', toolUseId: 'b1', tool: 'Bash', step: 'run', target: 'npm test' } }),
+      ev({ kind: 'tool', actor: 'assistant', title: 'Tool output', data: { runId: 'r9', toolUseId: 'b1', result: true, output: { text: 'ok', lines: 12 } } }),
+      ev({ kind: 'tool', actor: 'assistant', title: 'Update plan (0/1 done)', data: { runId: 'r9', toolUseId: 'p1', tool: 'TodoWrite', step: 'plan', target: null, plan: [{ text: 'Fix', status: 'in_progress' }] } }),
+      ev({ kind: 'tool', actor: 'assistant', title: 'Edit a.ts', data: { runId: 'r9', toolUseId: 'e1', tool: 'Edit', step: 'edit', target: 'src/a.ts', output: { diff: ['-a', '+b'], added: 1, removed: 1 } } }),
+    ];
+    const plain = buildLiveModel(events, true).blocks[0] as LiveRun;
+    expect(plain.steps.map((s) => s.kind)).toEqual(['run', 'edit']);
+    expect(plain.steps[0]).toMatchObject({ tool: 'Bash', status: 'done', output: { text: 'ok', lines: 12 } });
+    expect(plain.steps[1]).toMatchObject({ tool: 'Edit', status: 'running', output: { diff: ['-a', '+b'] } });
+    const terminal = buildLiveModel(events, true, { planSteps: true }).blocks[0] as LiveRun;
+    expect(terminal.steps.map((s) => s.kind)).toEqual(['run', 'plan', 'edit']);
+    expect(terminal.steps[1]).toMatchObject({ plan: [{ text: 'Fix', status: 'in_progress' }] });
+  });
+});
+
+describe('repeated calls', () => {
+  it('shows a command that is reported again after your approval as one step', () => {
+    const events = [
+      ev({ kind: 'agent', actor: 'assistant', title: 'Agent started', data: { runId: 'r7', phase: 'start', runtime: 'codex-cli', model: null } }),
+      ev({ kind: 'tool', actor: 'assistant', title: 'Run git commit -m x', data: { runId: 'r7', toolUseId: 'c1', tool: 'PowerShell', step: 'run', target: 'git commit -m x' } }),
+      ev({ kind: 'agent', actor: 'assistant', title: 'You allowed: git commit -m x', data: { runId: 'r7' } }),
+      ev({ kind: 'tool', actor: 'assistant', title: 'Run git commit -m x', data: { runId: 'r7', toolUseId: 'c1', tool: 'PowerShell', step: 'run', target: 'git commit -m x' } }),
+      ev({ kind: 'tool', actor: 'assistant', title: 'Tool output', data: { runId: 'r7', toolUseId: 'c1', result: true, output: { text: '[main b9a9725] x' } } }),
+    ];
+    const run = buildLiveModel(events, true).blocks[0] as LiveRun;
+    expect(run.steps.filter((s) => s.kind === 'run')).toHaveLength(1);
+    expect(run.steps.find((s) => s.kind === 'run')).toMatchObject({ status: 'done', output: { text: '[main b9a9725] x' } });
+  });
+});

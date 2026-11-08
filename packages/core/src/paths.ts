@@ -11,6 +11,8 @@ export interface OrbitPaths {
   worktrees: string;
   repos: string;
   logs: string;
+  /** Images attached to session messages. */
+  uploads: string;
 }
 
 /** `ORBIT_HOME` or `~/.orbit`. Everything Orbit stores lives here, never inside your repositories. */
@@ -29,10 +31,11 @@ export function orbitPaths(home: string): OrbitPaths {
     worktrees: path.join(home, 'worktrees'),
     repos: path.join(home, 'repos'),
     logs: path.join(home, 'logs'),
+    uploads: path.join(home, 'uploads'),
   };
 }
 
 export function ensureOrbitHome(paths: OrbitPaths): void {
   mkdirSync(paths.home, { recursive: true, mode: 0o700 });
-  for (const dir of [paths.worktrees, paths.repos, paths.logs]) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  for (const dir of [paths.worktrees, paths.repos, paths.logs, paths.uploads]) mkdirSync(dir, { recursive: true, mode: 0o700 });
 }

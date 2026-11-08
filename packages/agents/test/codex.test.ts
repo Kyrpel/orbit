@@ -53,6 +53,7 @@ describe('Codex event translation', () => {
       { type: 'tool_result', isError: true, id: 'item_1', summary: 'Exit code 1\n1 failing' },
       { type: 'tool', tool: 'Edit', id: 'item_2', summary: 'Edit cart.ts', step: 'edit', target: 'src/cart.ts' },
       { type: 'tool', tool: 'Write', id: 'item_2', summary: 'Write test.js', step: 'edit', target: 'test.js' },
+      { type: 'tool_result', isError: false, id: 'item_3', summary: '', output: { text: 'ok' } },
     ]);
   });
 
@@ -185,12 +186,65 @@ describe('Codex app-server events', () => {
     on('item/completed', { item: { id: 'u1', type: 'userMessage' } });
     on('turn/plan/updated', { plan: [{ step: 'Read', status: 'completed' }, { step: 'Fix', status: 'inProgress' }] });
     expect(out).toEqual([
-      { type: 'tool', tool: 'Bash', id: 'c1', summary: 'Run npm test', step: 'run', target: 'npm test' },
+      { type: 'tool', tool: 'PowerShell', id: 'c1', summary: 'Run npm test', step: 'run', target: 'npm test' },
       { type: 'tool_result', isError: true, id: 'c1', summary: 'Exit code 1\n1 failing' },
       { type: 'tool', tool: 'Edit', id: 'f1', summary: 'Edit a.ts', step: 'edit', target: 'src/a.ts' },
       { type: 'tool', tool: 'Write', id: 'f1', summary: 'Write b.ts', step: 'edit', target: 'b.ts' },
       { type: 'text', text: 'Done.' },
       { type: 'tool', tool: 'TodoWrite', summary: 'Update plan (1/2 done)', step: 'plan', target: null, plan: [{ text: 'Read', status: 'completed' }, { text: 'Fix', status: 'in_progress' }] },
     ]);
+  });
+
+  it('reports command output and file diffs for the terminal view', async () => {
+    const { translateAppServerNotification } = await import('../src');
+    const out: AgentEvent[] = [];
+    const on = (m: string, p: object) => translateAppServerNotification(m, p as Record<string, unknown>, cwd, (e) => out.push(e));
+    on('item/completed', { item: { id: 'c2', type: 'commandExecution', command: 'git status', exitCode: 0, aggregatedOutput: 'l1\nl2\nl3\nl4\nl5\nl6\n', status: 'completed' } });
+    on('item/started', {
+      item: {
+        id: 'f2',
+        type: 'fileChange',
+        changes: [
+          { path: path.join(cwd, 'a.ts'), kind: { type: 'update' }, diff: '--- a/a.ts\n+++ b/a.ts\n@@ -1,2 +1,2 @@\n const a = 1;\n-const b = 2;\n+const b = 3;\n' },
+          { path: path.join(cwd, 'new.ts'), kind: { type: 'add' }, diff: 'one\ntwo\n' },
+        ],
+      },
+    });
+    expect(out[0]).toEqual({ type: 'tool_result', isError: false, id: 'c2', summary: '', output: { text: 'l1\nl2\nl3\nl4', lines: 6 } });
+    expect(out[1]).toMatchObject({ tool: 'Edit', output: { diff: [' const a = 1;', '-const b = 2;', '+const b = 3;'], added: 1, removed: 1 } });
+    expect(out[2]).toMatchObject({ tool: 'Write', output: { diff: ['+one', '+two'], added: 2, removed: 0 } });
+  });
+});
+
+describe('attached images', () => {
+  it('sends images to Claude Code as image blocks before the text, and to Codex as local files', async () => {
+    const { userContent, codexInput, imageNote } = await import('../src');
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orbit-img-'));
+    const file = path.join(dir, 'a.png');
+    fs.writeFileSync(file, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64'));
+    try {
+      expect(userContent('hi')).toBe('hi');
+      expect(userContent('What is this? [Image #1]', [{ path: file, mediaType: 'image/png' }])).toEqual([
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==' } },
+        { type: 'text', text: 'What is this? [Image #1]' },
+      ]);
+      expect(codexInput('See [Image #1]', [{ path: file, mediaType: 'image/png' }])).toEqual([
+        { type: 'text', text: 'See [Image #1]' },
+        { type: 'localImage', path: file },
+      ]);
+      expect(imageNote([{ path: file, mediaType: 'image/png' }])).toContain(`[Image #1] ${file}`);
+      expect(imageNote(undefined)).toBe('');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('attaches images to fresh Codex exec runs with -i', () => {
+    const rt = new CodexCliRuntime('codex', {}, 'linux');
+    const args = rt.buildArgs(req({ images: [{ path: '/tmp/a.png', mediaType: 'image/png' }] }), null);
+    expect(args.slice(args.indexOf('-i'), args.indexOf('-i') + 2)).toEqual(['-i', '/tmp/a.png']);
+    expect(args.at(-1)).toBe('-');
   });
 });

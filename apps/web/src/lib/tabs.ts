@@ -11,9 +11,13 @@ export interface WorkspaceTab {
   sessionId: string | null;
 }
 
+/** `grid`: every open project side by side. `tabs`: one at a time, full size. */
+export type WorkspaceLayout = 'grid' | 'tabs';
+
 interface TabState {
   tabs: WorkspaceTab[];
   active: string | null;
+  layout: WorkspaceLayout;
 }
 
 const STORAGE_KEY = 'orbit.workspace.tabs.v1';
@@ -22,14 +26,14 @@ const listeners = new Set<() => void>();
 function load(): TabState {
   try {
     const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? 'null') as TabState | null;
-    if (raw && Array.isArray(raw.tabs)) return { tabs: raw.tabs.filter((t) => t && typeof t.key === 'string' && typeof t.repoId === 'string'), active: raw.active ?? null };
+    if (raw && Array.isArray(raw.tabs)) return { tabs: raw.tabs.filter((t) => t && typeof t.key === 'string' && typeof t.repoId === 'string'), active: raw.active ?? null, layout: raw.layout === 'tabs' ? 'tabs' : 'grid' };
   } catch {
     /* ignore a corrupt entry */
   }
-  return { tabs: [], active: null };
+  return { tabs: [], active: null, layout: 'grid' };
 }
 
-let state: TabState = typeof localStorage === 'undefined' ? { tabs: [], active: null } : load();
+let state: TabState = typeof localStorage === 'undefined' ? { tabs: [], active: null, layout: 'grid' } : load();
 
 function set(next: TabState) {
   state = next;
@@ -56,6 +60,9 @@ export function useTabs(): TabState {
 
 export const tabs = {
   get: () => state,
+  setLayout(layout: WorkspaceLayout) {
+    if (state.layout !== layout) set({ ...state, layout });
+  },
   activate(key: string) {
     if (state.tabs.some((t) => t.key === key)) set({ ...state, active: key });
   },
@@ -71,7 +78,7 @@ export const tabs = {
   /** Always a fresh tab, like opening another terminal in the same folder. */
   newSession(repoId: string): WorkspaceTab {
     const tab = { key: newKey(), repoId, sessionId: null };
-    set({ tabs: [...state.tabs, tab], active: tab.key });
+    set({ ...state, tabs: [...state.tabs, tab], active: tab.key });
     return tab;
   },
   /** Focus (or open) the tab that shows a session. */
@@ -82,7 +89,7 @@ export const tabs = {
       return existing;
     }
     const tab = { key: newKey(), repoId, sessionId };
-    set({ tabs: [...state.tabs, tab], active: tab.key });
+    set({ ...state, tabs: [...state.tabs, tab], active: tab.key });
     return tab;
   },
   /** A new session tab became a real session after its first message. */
@@ -98,11 +105,11 @@ export const tabs = {
     if (i < 0) return;
     const rest = state.tabs.filter((t) => t.key !== key);
     const active = state.active === key ? (rest[Math.min(i, rest.length - 1)]?.key ?? null) : state.active;
-    set({ tabs: rest, active });
+    set({ ...state, tabs: rest, active });
   },
   /** Drop tabs whose project or session no longer exists. */
   prune(repoIds: Set<string>, sessionIds: Set<string> | null) {
     const kept = state.tabs.filter((t) => repoIds.has(t.repoId) && (!t.sessionId || !sessionIds || sessionIds.has(t.sessionId)));
-    if (kept.length !== state.tabs.length) set({ tabs: kept, active: kept.some((t) => t.key === state.active) ? state.active : (kept[0]?.key ?? null) });
+    if (kept.length !== state.tabs.length) set({ ...state, tabs: kept, active: kept.some((t) => t.key === state.active) ? state.active : (kept[0]?.key ?? null) });
   },
 };

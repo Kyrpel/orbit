@@ -8,6 +8,7 @@ import {
   emptyResult,
   extractJson,
   commandParts,
+  imageNote,
   isAllowableCommand,
   isUsageLimitError,
   type AgentRunContext,
@@ -17,7 +18,7 @@ import {
   type AgentRuntime,
   type RuntimeAvailability,
 } from './runtime';
-import { emitAssistantContent, emitToolResults } from './claude-stream';
+import { emitAssistantContent, emitToolResults, type ToolCallLog } from './claude-stream';
 
 type SdkModule = typeof import('@anthropic-ai/claude-agent-sdk');
 
@@ -108,7 +109,9 @@ export class ClaudeAgentSdkRuntime implements AgentRuntime {
       allowNetworkTools: req.execution.allowNetworkTools,
       // "Ask first": only allowed command parts run. "Auto": the SDK's auto mode classifier decides.
       allowedCommands: req.commands?.mode === 'allowlist' ? [...new Set(req.commands.allowed.filter(isAllowableCommand).flatMap(commandParts))] : null,
+      allowGit: !!req.allowGit && req.access === 'workspace-write',
     };
+    const calls: ToolCallLog = new Map();
     const tools: string[] = req.access === 'workspace-write' ? [...ENGINEER_TOOLS] : [...READ_ONLY_TOOLS];
     if (req.execution.allowNetworkTools) tools.push('WebFetch', 'WebSearch');
     const denied: { tool: string; reason: string; command?: string }[] = [];
@@ -120,11 +123,12 @@ export class ClaudeAgentSdkRuntime implements AgentRuntime {
 
     try {
       const stream = query({
-        prompt: req.prompt,
+        prompt: `${req.prompt}${imageNote(req.images)}`,
         options: {
           abortController: abort,
           cwd: req.cwd,
-          additionalDirectories: req.readRoots,
+          // Attached images are opened with the Read tool, so their folder is readable too.
+          additionalDirectories: [...req.readRoots, ...new Set((req.images ?? []).map((i) => path.dirname(i.path)))],
           tools,
           // In Auto, shell commands are left to the auto-mode classifier rather than pre-approved.
           allowedTools: req.access === 'workspace-write' && req.commands?.mode === 'auto' ? tools.filter((t) => t !== 'Bash' && t !== 'PowerShell') : tools,
@@ -190,10 +194,10 @@ export class ClaudeAgentSdkRuntime implements AgentRuntime {
           const m = message as { model?: string };
           ctx.onEvent({ type: 'status', message: `Session started${m.model ? ` (${m.model})` : ''}` });
         } else if (message.type === 'assistant') {
-          const last = emitAssistantContent(message.message?.content, ctx.onEvent);
+          const last = emitAssistantContent(message.message?.content, ctx.onEvent, calls);
           if (last) text = last;
         } else if (message.type === 'user') {
-          emitToolResults((message.message as { content?: unknown })?.content, ctx.onEvent, { detectDenied: false });
+          emitToolResults((message.message as { content?: unknown })?.content, ctx.onEvent, { detectDenied: false, calls });
         } else if (message.type === 'result') {
           const r = message as {
             subtype: string;

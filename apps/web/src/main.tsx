@@ -14,6 +14,7 @@ import { MissionPage } from './pages/mission';
 import { MissionsPage } from './pages/missions';
 import { ProjectsPage } from './pages/projects';
 import { SettingsPage } from './pages/settings';
+import { SkillsPage } from './pages/skills';
 import { SetupPage } from './pages/setup';
 import { SignInPage } from './pages/sign-in';
 import { TodayPage } from './pages/today';
@@ -74,6 +75,7 @@ const router = createBrowserRouter([
       { path: 'missions/:id', element: <MissionPage /> },
       { path: 'projects', element: <ProjectsPage /> },
       { path: 'agents', element: <AgentsPage /> },
+      { path: 'skills', element: <SkillsPage /> },
       { path: 'activity', element: <ActivityPage /> },
       { path: 'integrations', element: <IntegrationsPage /> },
       { path: 'settings', element: <SettingsPage /> },

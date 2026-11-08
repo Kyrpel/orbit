@@ -169,6 +169,7 @@ export class Pipeline {
       signal: o.jctx.signal,
       onEvent: (e) => {
         o.jctx.heartbeat();
+        if (e.type === 'tool_result' && !e.isError) return;
         if (e.type === 'text') this.ctx.bus.publish({ type: 'agent.output', missionId: o.mission.id, runId, role: o.role, text: e.text });
         recordMissionEvent(this.ctx, o.mission.id, { ...agentEventRecord(e, runId), actor: o.role, missionRepoId: o.missionRepoId });
       },

@@ -34,3 +34,12 @@ describe('inline Markdown', () => {
     expect(html('**bold** and *it*')).toContain('<strong');
   });
 });
+
+describe('tables', () => {
+  it('reads Markdown tables into rows, without the separator line', () => {
+    expect(parseBlocks('| File | Change |\n|---|:---:|\n| a.ts | fixed |\n\nAfter.')).toEqual([
+      { type: 'table', rows: [['File', 'Change'], ['a.ts', 'fixed']] },
+      { type: 'para', text: 'After.' },
+    ]);
+  });
+});

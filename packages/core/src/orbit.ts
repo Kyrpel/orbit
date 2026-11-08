@@ -6,6 +6,7 @@ import { DEFAULT_PORT, OrbitError, type RuntimeId } from '@orbit/shared';
 import { consoleLogger, EventBus, type Logger } from './bus';
 import { ChatService } from './chat';
 import { PromptEngineer } from './prompter';
+import { SkillsService } from './skills';
 import { nowIso, recordMissionEvent, SettingsService, type OrbitContext, type ProviderFactory } from './context';
 import { runDoctor } from './doctor';
 import { IntegrationService } from './integrations';
@@ -62,6 +63,7 @@ export class Orbit {
   readonly overview: OverviewService;
   readonly chat: ChatService;
   readonly prompter: PromptEngineer;
+  readonly skills: SkillsService;
   readonly worker: Worker;
   private readonly handle: DatabaseHandle;
   private running = false;
@@ -119,6 +121,7 @@ export class Orbit {
     this.overview = new OverviewService(this.ctx, this.missions, this.integrations);
     this.chat = new ChatService(this.ctx, this.repos);
     this.prompter = new PromptEngineer(this.ctx, this.integrations, this.repos);
+    this.skills = new SkillsService(this.ctx);
     this.worker = new Worker(
       this.queue,
       {

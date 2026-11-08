@@ -383,4 +383,12 @@ ALTER TABLE reviews ADD COLUMN kind TEXT NOT NULL DEFAULT 'quality';
     id: '0009_session_model',
     sql: `ALTER TABLE conversations ADD COLUMN model TEXT;`,
   },
+  {
+    id: '0010_session_effort',
+    sql: `ALTER TABLE conversations ADD COLUMN effort TEXT;`,
+  },
+  {
+    id: '0011_message_attachments',
+    sql: `ALTER TABLE conversation_messages ADD COLUMN attachments TEXT;`,
+  },
 ];

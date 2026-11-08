@@ -1,4 +1,4 @@
-import type { AgentPlanItem, AgentStepKind, EffortLevel, ExecutionMode, RuntimeId, TeamSeat } from '@orbit/shared';
+import type { AgentPlanItem, AgentStepKind, EffortLevel, ExecutionMode, RuntimeId, StepOutput, TeamSeat } from '@orbit/shared';
 
 export interface ExecutionPolicy {
   /** `sandbox`: the runtime must enforce OS-level isolation or fail. `trusted-local`: runs directly on this machine. */
@@ -46,6 +46,26 @@ export interface AgentRunRequest {
    * on task text from trackers.
    */
   userEnvironment?: boolean;
+  /**
+   * Working sessions: the agent may commit and push itself when the developer asks (through
+   * the normal command approval). Force pushes, history rewrites, git settings and publishing
+   * stay blocked. Off for Autopilot, where Orbit commits and pushes after your approval.
+   */
+  allowGit?: boolean;
+  /** Images the developer attached to the message (saved by Orbit; the agent sees them). */
+  images?: AgentImage[];
+}
+
+/** An image attached to a message, as a file Orbit saved. */
+export interface AgentImage {
+  path: string;
+  mediaType: string;
+}
+
+/** For runtimes that cannot attach images directly: where the agent can open them. */
+export function imageNote(images: AgentImage[] | undefined): string {
+  if (!images?.length) return '';
+  return `\n\nThe developer attached ${images.length === 1 ? 'an image' : `${images.length} images`} ([Image #1] and so on, in order). Look at ${images.length === 1 ? 'it' : 'them'} with your file-reading tool:\n${images.map((i, n) => `[Image #${n + 1}] ${i.path}`).join('\n')}`;
 }
 
 /**
@@ -118,8 +138,10 @@ export type AgentEvent =
       step?: AgentStepKind;
       target?: string | null;
       plan?: AgentPlanItem[];
+      /** Known when the call starts, e.g. an edit's changed lines. */
+      output?: StepOutput;
     }
-  | { type: 'tool_result'; isError: boolean; summary: string; id?: string }
+  | { type: 'tool_result'; isError: boolean; summary: string; id?: string; output?: StepOutput }
   | { type: 'denied'; tool: string; reason: string; command?: string };
 
 /** `rate_limited`: the AI's plan or account hit its usage limit; another AI may still be able to run. */
@@ -163,8 +185,20 @@ export interface RuntimeAvailability {
   details: Record<string, string>;
 }
 
-/** Delivers a message to the agent while it is working; false when it can no longer take one. */
-export type SteerFn = (text: string) => boolean;
+/** Delivers a message (and any images with it) while the agent works; false when it can no longer take one. */
+export type SteerFn = (text: string, images?: AgentImage[]) => boolean;
+
+/** An agent asking, mid-answer, to run something its sandbox blocks (Codex's on-request approvals). */
+export interface ApprovalRequest {
+  kind: 'command' | 'file';
+  /** The command, already unwrapped from its shell and redacted. */
+  command: string | null;
+  reason: string | null;
+  network: boolean;
+}
+
+/** `acceptForSession`: also run similar requests in this agent session without asking. `cancel` stops the answer. */
+export type ApprovalDecision = 'accept' | 'acceptForSession' | 'decline' | 'cancel';
 
 export interface AgentRunContext {
   signal: AbortSignal;
@@ -175,6 +209,11 @@ export interface AgentRunContext {
    * messages, and with null when it no longer can (the answer is finishing).
    */
   onSteerReady?: (steer: SteerFn | null) => void;
+  /**
+   * Set by callers that can answer approval requests (working sessions). A runtime that
+   * supports them lets the agent ask instead of failing; without it, such requests are refused.
+   */
+  onApproval?: (request: ApprovalRequest) => Promise<ApprovalDecision>;
 }
 
 /** A pluggable agent backend. Orbit ships Claude Agent SDK, Claude Code CLI, Codex CLI and a scripted test runtime. */

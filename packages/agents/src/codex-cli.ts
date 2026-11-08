@@ -6,9 +6,11 @@ import { execa } from 'execa';
 import { redactSecrets, type AgentPlanItem } from '@orbit/shared';
 import { runCodexAppServer } from './codex-app-server';
 import { buildAgentEnv } from './env';
+import { outputPreview } from './output';
 import {
   emptyResult,
   extractJson,
+  imageNote,
   isUsageLimitError,
   type AgentEvent,
   type AgentRunContext,
@@ -23,6 +25,11 @@ import {
 const CODEX_ENV = ['CODEX_HOME'];
 
 /** Strips the shell wrapper Codex puts around commands, so the step shows what actually runs. */
+/** The shell Codex ran a command in, named the way Claude Code names its shell tools. */
+export function shellName(command: string): string {
+  return /powershell|pwsh/i.test(command) ? 'PowerShell' : 'Bash';
+}
+
 export function unwrapShellCommand(command: string): string {
   const ps = /-Command\s+(['"])([\s\S]*)\1\s*$/.exec(command);
   if (ps?.[2]) return ps[2].replace(/''/g, "'").trim();
@@ -64,7 +71,7 @@ export function translateCodexEvent(event: { type?: string; item?: CodexItem }, 
   if (event.type === 'item.started') {
     if (item.type === 'command_execution' && item.command) {
       const cmd = redactSecrets(unwrapShellCommand(item.command));
-      onEvent({ type: 'tool', tool: 'Bash', id, summary: `Run ${cmd.slice(0, 140)}`, step: 'run', target: cmd.slice(0, 300) });
+      onEvent({ type: 'tool', tool: shellName(item.command), id, summary: `Run ${cmd.slice(0, 140)}`, step: 'run', target: cmd.slice(0, 300) });
     } else if (item.type === 'file_change' && item.changes?.length) {
       for (const c of item.changes) {
         const file = shortPath(c.path, cwd);
@@ -96,6 +103,8 @@ export function translateCodexEvent(event: { type?: string; item?: CodexItem }, 
   } else if (item.type === 'command_execution' && (item.status === 'failed' || (item.exit_code != null && item.exit_code !== 0))) {
     const out = redactSecrets(String(item.aggregated_output ?? '').slice(-1500));
     onEvent({ type: 'tool_result', isError: true, id, summary: `Exit code ${item.exit_code ?? '?'}${out ? `\n${out}` : ''}` });
+  } else if (item.type === 'command_execution') {
+    onEvent({ type: 'tool_result', isError: false, id, summary: '', output: outputPreview(String(item.aggregated_output ?? '')) });
   } else if (item.type === 'file_change' && item.status === 'failed') {
     onEvent({ type: 'tool_result', isError: true, id, summary: 'The file change was not applied.' });
   } else if (item.type === 'error' && item.message) {
@@ -168,6 +177,7 @@ export class CodexCliRuntime implements AgentRuntime {
     if (req.model) args.push('-m', req.model);
     if (req.effort) args.push('-c', `model_reasoning_effort="${req.effort}"`);
     if (schemaFile && !resumeId) args.push('--output-schema', schemaFile);
+    if (!resumeId) for (const img of req.images ?? []) args.push('-i', img.path);
     args.push('-');
     return args;
   }
@@ -175,7 +185,8 @@ export class CodexCliRuntime implements AgentRuntime {
   /** Codex has no separate system prompt flag, so role instructions lead the prompt. */
   buildPrompt(req: AgentRunRequest): string {
     // A resumed session already has its instructions; send only the new message.
-    if (req.session?.resumeId) return req.prompt;
+    // Resumed runs cannot take -i, so they get the image paths in the message instead.
+    if (req.session?.resumeId) return `${req.prompt}${imageNote(req.images)}`;
     const extra = req.readRoots.length ? `\n\nYou may also read (never modify) these directories:\n${req.readRoots.map((r) => `- ${r}`).join('\n')}` : '';
     return `<orbit_role_instructions>\n${req.systemAppend}${extra}\n</orbit_role_instructions>\n\n${req.prompt}`;
   }

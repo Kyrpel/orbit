@@ -16,3 +16,4 @@ playwright-report/
 # Local tool settings and design scratch files
 .claude/settings.local.json
 .impeccable/
+.playwright-mcp/
