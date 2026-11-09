@@ -248,3 +248,13 @@ describe('attached images', () => {
     expect(args.at(-1)).toBe('-');
   });
 });
+
+describe('commands Codex runs through PowerShell', () => {
+  it('shows a bash command run inside the PowerShell wrapper as Bash with the real command', async () => {
+    const { shellName, unwrapShellCommand } = await import('../src');
+    const raw = String.raw`"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -Command '& ''C:\Program Files\Git\bin\bash.exe'' -lc "ls -la && cat package.json"'`;
+    expect(shellName(raw)).toBe('Bash');
+    expect(unwrapShellCommand(raw)).toBe('ls -la && cat package.json');
+    expect(shellName(`"powershell.exe" -Command 'Get-ChildItem'`)).toBe('PowerShell');
+  });
+});

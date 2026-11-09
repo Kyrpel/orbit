@@ -24,15 +24,23 @@ import {
 /** Environment Codex itself needs, on top of the shared agent allowlist. Never includes API keys. */
 const CODEX_ENV = ['CODEX_HOME'];
 
-/** Strips the shell wrapper Codex puts around commands, so the step shows what actually runs. */
-/** The shell Codex ran a command in, named the way Claude Code names its shell tools. */
+/** A bash run inside the PowerShell wrapper (`& 'C:\…\bash.exe' -lc "…"`), when Codex chooses one. */
+const BASH_INSIDE = /^&\s*(['"])[^'"]*bash(?:\.exe)?\1\s+-l?c\s+(['"])([\s\S]*)\2\s*$/i;
+
+/** The shell a command really ran in, named the way Claude Code names its shell tools. */
 export function shellName(command: string): string {
+  const inner = /-Command\s+(['"])([\s\S]*)\1\s*$/.exec(command)?.[2]?.replace(/''/g, "'").trim();
+  if (inner && BASH_INSIDE.test(inner)) return 'Bash';
   return /powershell|pwsh/i.test(command) ? 'PowerShell' : 'Bash';
 }
 
+/** Strips the shell wrappers Codex puts around commands, so the step shows what actually runs. */
 export function unwrapShellCommand(command: string): string {
   const ps = /-Command\s+(['"])([\s\S]*)\1\s*$/.exec(command);
-  if (ps?.[2]) return ps[2].replace(/''/g, "'").trim();
+  if (ps?.[2]) {
+    const inner = ps[2].replace(/''/g, "'").trim();
+    return BASH_INSIDE.exec(inner)?.[3]?.trim() ?? inner;
+  }
   const sh = /^(?:\S*\/)?(?:bash|sh|zsh)\s+-l?c\s+(['"])([\s\S]*)\1\s*$/.exec(command);
   if (sh?.[2]) return sh[2].trim();
   return command.trim();
