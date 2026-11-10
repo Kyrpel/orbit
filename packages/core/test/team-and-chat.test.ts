@@ -107,6 +107,8 @@ describe('Ask conversations', () => {
   async function setup(runtimes: AgentRuntime[]) {
     root = tempDir();
     orbit = createOrbit({ home: path.join(root, 'home'), dbFile: ':memory:', runtimes, secrets: new MemorySecretStore(), logger: silentLogger, platform: 'linux' });
+    // Suggestions add a call after every answer; only their own test turns them on.
+    orbit.ctx.settings.update({ execution: { suggestNext: false } });
     const { repoPath } = await makeRepo(root, 'shop-api');
     return orbit.repos.register(repoPath);
   }
@@ -320,6 +322,8 @@ describe('working sessions (the workspace)', () => {
   async function setup(runtimes: AgentRuntime[]) {
     root = tempDir();
     orbit = createOrbit({ home: path.join(root, 'home'), dbFile: ':memory:', runtimes, secrets: new MemorySecretStore(), logger: silentLogger, platform: 'linux' });
+    // Suggestions add a call after every answer; only their own test turns them on.
+    orbit.ctx.settings.update({ execution: { suggestNext: false } });
     const { repoPath } = await makeRepo(root, 'shop-api');
     const repo = await orbit.repos.register(repoPath);
     orbit.repos.update(repo.id, { verifyCommands: [{ id: '', label: 'Tests', command: 'npm test', timeoutSec: 60, enabled: true, source: 'user' }] });
@@ -441,6 +445,32 @@ describe('working sessions (the workspace)', () => {
     expect(orbit.chat.detail(s.id).messages.find((m) => m.status === 'steered')?.attachments).toHaveLength(1);
     release();
     await until(() => !orbit.chat.isRunning(s.id));
+  });
+
+  it('suggests your likely next message after an answer, with a small model, until you move on', async () => {
+    const calls: AgentRunRequest[] = [];
+    const repo = await setup([
+      fake('claude-code-cli', {
+        calls,
+        behave: (req) => (req.role === 'prompter' ? { status: 'succeeded', text: '"Now commit and push"\n' } : { status: 'succeeded', text: 'I fixed the cart. Want me to commit it?' }),
+      }),
+    ]);
+    orbit.ctx.settings.update({ execution: { suggestNext: true } });
+    const s = orbit.chat.start({ message: 'Fix the cart', repoIds: [repo.id], mode: 'edit' });
+    await until(() => orbit.chat.detail(s.id).nextPrompt !== null);
+    expect(orbit.chat.detail(s.id).nextPrompt).toBe('Now commit and push');
+    const guess = calls.find((c) => c.role === 'prompter')!;
+    expect(guess).toMatchObject({ model: 'haiku', effort: 'low', access: 'read-only', maxTurns: 1 });
+    expect(guess.prompt).toContain('Want me to commit it?');
+
+    // Sending something clears it; with the setting off, no guess is made.
+    orbit.ctx.settings.update({ execution: { suggestNext: false } });
+    orbit.chat.send(s.id, { message: 'Thanks' });
+    expect(orbit.chat.detail(s.id).nextPrompt).toBeNull();
+    await until(() => !orbit.chat.isRunning(s.id) && orbit.chat.detail(s.id).messages.length === 4);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(calls.filter((c) => c.role === 'prompter')).toHaveLength(1);
+    expect(orbit.chat.detail(s.id).nextPrompt).toBeNull();
   });
 
   it('edits directly in the project, with only approved commands, and resumes the session', async () => {

@@ -709,3 +709,40 @@ export const SECURITY_CHAT_SYSTEM = SECURITY_SYSTEM.replace(
   '- Your final answer must be the structured JSON object requested.',
   '- Answer in Markdown for the developer: a one-line verdict first, then each finding with severity, file, problem and fix.',
 );
+
+/** Predicts the developer's next message after an answer, as Claude Code's prompt suggestions do. */
+export const NEXT_PROMPT_SYSTEM = `You predict what a developer will most likely type next to their coding agent, so it can be offered as a suggestion they accept with one key.
+
+Rules:
+- ${UNTRUSTED_NOTICE}
+- Reply with only that next message, written as the developer: one line, at most 15 words, in the language and style they use.
+- If the agent asked a question or offered options, give the answer they would most likely pick.
+- If the agent finished, suggest the natural next step (test it, commit and push, the next feature).
+- Never use tools. If there is no obvious next message, reply with an empty line.`;
+
+export function nextPromptPrompt(args: { request: string; answer: string }): string {
+  return [
+    'The developer wrote:',
+    '<untrusted_developer_message>',
+    args.request.slice(0, 1500),
+    '</untrusted_developer_message>',
+    '',
+    'The agent answered:',
+    '<untrusted_agent_answer>',
+    args.answer.slice(-4000),
+    '</untrusted_agent_answer>',
+    '',
+    "Reply with the developer's most likely next message, nothing else.",
+  ].join('\n');
+}
+
+/** One clean line from the model's reply, or null when it has nothing useful. */
+export function cleanNextPrompt(text: string): string | null {
+  const line = (text.split(/\r?\n/).map((l) => l.trim()).find(Boolean) ?? '')
+    .replace(/^(developer|you|user|next message)\s*:\s*/i, '')
+    .replace(/^["'`“]+|["'`”]+$/g, '')
+    .trim();
+  if (!line || line.length > 200 || /^(none|nothing|n\/a|\(empty\))\.?$/i.test(line)) return null;
+  return line;
+}
+

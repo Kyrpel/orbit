@@ -3,6 +3,9 @@ import path from 'node:path';
 import {
   ASSISTANT_SYSTEM,
   assistantPrompt,
+  cleanNextPrompt,
+  NEXT_PROMPT_SYSTEM,
+  nextPromptPrompt,
   deniedCommandReason,
   isAllowableCommand,
   parseAssistantReply,
@@ -90,6 +93,8 @@ export class ChatService {
   private readonly running = new Map<string, AbortController>();
   /** For agents that take messages mid-answer: delivers one right away. */
   private readonly steers = new Map<string, SteerFn>();
+  /** Your likely next message, per session, for the answer it follows (`after`). */
+  private readonly nextPrompts = new Map<string, { after: string; text: string }>();
   /** Requests the agent is waiting on, oldest first (Codex asking to run what its sandbox blocks). */
   private readonly approvals = new Map<string, { dto: SessionApprovalDTO; messageId: string; runId: string; resolve: (d: ApprovalDecision) => void }[]>();
 
@@ -115,6 +120,7 @@ export class ChatService {
       messages: msgs.map(toMessageDTO),
       events: events.map((e) => ({ id: e.id, conversationId: e.conversationId, messageId: e.messageId, ts: e.ts, kind: e.kind as MissionEventKind, actor: e.actor as ChatEventDTO['actor'], title: e.title, detail: e.detail, data: e.data })),
       approval: this.approvals.get(id)?.[0]?.dto ?? null,
+      nextPrompt: this.nextPromptFor(id, msgs),
     };
   }
 
@@ -336,6 +342,7 @@ export class ChatService {
 
   /** Stores the visible message and starts the agent on it (`prompt` overrides what the agent receives). */
   private ask(conversationId: string, message: string, prompt?: string, images?: ChatImageInput[]): void {
+    this.nextPrompts.delete(conversationId);
     const ts = nowIso(this.ctx);
     const userId = newId('msg');
     const attachments = this.saveImages(conversationId, userId, images);
@@ -405,6 +412,7 @@ export class ChatService {
       } else {
         this.finish(messageId, { status: 'done', content: result.text.trim() || (blocked.length ? 'I need your OK to run a command.' : 'Done.'), blocked, durationMs: result.durationMs });
       }
+      if (conv.seat !== 'security' && this.ctx.settings.get().execution.suggestNext) void this.suggestNext(conversationId, messageId);
     } else if (result.status === 'cancelled') {
       this.finish(messageId, { status: 'cancelled', content: result.text ? parseAssistantReply(result.text).answer : '', blocked, durationMs: result.durationMs });
     } else {
@@ -591,6 +599,58 @@ export class ChatService {
     this.approvals.delete(conversationId);
     for (const p of list) p.resolve('cancel');
     this.ctx.bus.publish({ type: 'chat.updated', conversationId });
+  }
+
+  /** The suggestion, while it still follows the last answer and nothing new is running. */
+  private nextPromptFor(id: string, msgs: ConversationMessageRow[]): string | null {
+    const n = this.nextPrompts.get(id);
+    const lastAgent = [...msgs].reverse().find((m) => m.role === 'assistant');
+    return n && lastAgent?.id === n.after && lastAgent.status === 'done' && !this.running.has(id) ? n.text : null;
+  }
+
+  /**
+   * Like Claude Code's prompt suggestions: after an answer, a small, cheap model guesses
+   * your next message. Optional and best effort: any problem just means no suggestion.
+   */
+  private async suggestNext(conversationId: string, answerId: string): Promise<void> {
+    try {
+      const msgs = this.messages(conversationId);
+      const at = msgs.findIndex((m) => m.id === answerId);
+      const answer = msgs[at];
+      if (!answer?.content.trim()) return;
+      const request = [...msgs.slice(0, at)].reverse().find((m) => m.role === 'user')?.content ?? '';
+      const cwd = this.projectsFor(this.row(conversationId).repoIds)[0]?.localPath;
+      const plan = await planSeat(this.ctx, 'prompter');
+      const seat = [plan.primary, plan.fallback].find((s) => s?.availability.available && s.runtime.kind === 'ai');
+      if (!seat || !cwd) return;
+      const result = await seat.runtime.run(
+        {
+          role: 'prompter',
+          prompt: nextPromptPrompt({ request, answer: answer.content }),
+          systemAppend: NEXT_PROMPT_SYSTEM,
+          cwd,
+          readRoots: [],
+          access: 'read-only',
+          maxTurns: 1,
+          timeoutMs: 60_000,
+          maxBudgetUsd: null,
+          // The smallest, fastest model is plenty for one line.
+          model: seat.provider === 'claude' ? 'haiku' : seat.model,
+          effort: 'low',
+          outputSchema: null,
+          execution: { mode: 'trusted-local', allowNetworkTools: false },
+        },
+        { signal: AbortSignal.timeout(75_000), onEvent: () => undefined },
+      );
+      const text = result.status === 'succeeded' ? cleanNextPrompt(redactSecrets(result.text)) : null;
+      // Only while that answer is still the latest and you have not moved on.
+      const latest = [...this.messages(conversationId)].reverse().find((m) => m.role === 'assistant');
+      if (!text || latest?.id !== answerId || this.running.has(conversationId)) return;
+      this.nextPrompts.set(conversationId, { after: answerId, text });
+      this.ctx.bus.publish({ type: 'chat.updated', conversationId });
+    } catch {
+      /* no suggestion this time */
+    }
   }
 
   /** Saves a message's images in the conversation's upload folder (after checking them). */

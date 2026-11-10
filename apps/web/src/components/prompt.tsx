@@ -164,6 +164,8 @@ export interface PromptOptions {
   menu: MenuKind | null;
   setMenu: (m: MenuKind | null) => void;
   maxHeight?: number;
+  /** Your likely next message (after an answer): shown greyed out, Tab takes it. */
+  suggestion?: string | null;
 }
 
 const compactCount = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1_000 ? `${Math.round(n / 1_000)}k` : String(n));
@@ -368,6 +370,9 @@ export function usePrompt(o: PromptOptions) {
     );
   };
 
+  // Shown while the prompt is empty and the agent is idle, as Claude Code does.
+  const ghost = !o.value && !o.running && o.suggestion ? o.suggestion : null;
+
   const cycleMode = () => {
     if (!o.security && o.canEdit) o.onMode(nextMode(o.mode, o.canEdit));
   };
@@ -377,6 +382,11 @@ export function usePrompt(o: PromptOptions) {
     if (e.key === 'Tab' && e.shiftKey) {
       e.preventDefault();
       cycleMode();
+      return;
+    }
+    if (e.key === 'Tab' && !o.value && ghost) {
+      e.preventDefault();
+      o.onChange(ghost);
       return;
     }
     if (suggestions.length) {
@@ -620,6 +630,7 @@ export function usePrompt(o: PromptOptions) {
     proposalMenu,
     submit,
     cycleMode,
+    ghost,
     openMenu: o.setMenu,
     status: {
       aiText: `${choices.ai === 'codex' ? 'Codex' : 'Claude'}${o.provider === 'auto' ? ' (auto)' : ''}`,

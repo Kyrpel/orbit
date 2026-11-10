@@ -226,6 +226,12 @@ export function SettingsPage() {
                 <option value="auto">Auto-accept (safety-checked)</option>
               </select>
             </Row>
+            <Row
+              title="Suggest my next message"
+              description="After each answer, a small, fast model guesses what you will type next and shows it greyed out in the prompt; Tab uses it, like Claude Code. Each suggestion is one short, cheap model call."
+            >
+              <Switch checked={s.execution.suggestNext} onCheckedChange={(v) => set({ execution: { suggestNext: v } })} label="Suggest my next message" />
+            </Row>
             <Row title="Allow agents to use the web" description="WebFetch and WebSearch are off by default: task text is untrusted, and the web is an easy way to leak code.">
               <Switch checked={s.execution.allowAgentNetwork} onCheckedChange={(v) => set({ execution: { allowAgentNetwork: v } })} label="Allow agent web access" />
             </Row>

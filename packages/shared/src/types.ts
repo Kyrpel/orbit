@@ -732,6 +732,8 @@ export interface ConversationDetailDTO extends ConversationSummaryDTO {
   events: ChatEventDTO[];
   /** The agent is waiting for your answer before it runs something (Codex, outside its sandbox). */
   approval: SessionApprovalDTO | null;
+  /** Your likely next message, suggested after the last answer (Tab puts it in the prompt). */
+  nextPrompt: string | null;
 }
 
 /** Codex asking, mid-answer, to run something its sandbox blocks (a push, a commit, a download). */

@@ -315,7 +315,7 @@ export function Composer({ prompt, placeholder, steerable, big, autoFocus = true
         <textarea
           {...p.textarea}
           rows={big ? 3 : 1}
-          placeholder={p.dragging ? 'Drop the image to attach it' : placeholder}
+          placeholder={p.dragging ? 'Drop the image to attach it' : (p.ghost ?? placeholder)}
           aria-label="Your message"
           autoFocus={autoFocus}
           className={cn('block max-h-64 w-full resize-none bg-transparent px-4 pt-3 text-chalk outline-none placeholder:text-dust-2', big ? 'min-h-[84px] text-base' : 'min-h-[28px] text-[14.5px]')}
@@ -333,6 +333,7 @@ export function Composer({ prompt, placeholder, steerable, big, autoFocus = true
           </button>
           <span className="flex items-center gap-2">
             <span className="hidden text-2xs text-dust-2 md:inline">
+              {p.ghost ? 'Tab to use the suggestion · ' : ''}
               {running && onStop && !steerable ? 'Enter to queue' : 'Enter to send'} · / for commands · ? for shortcuts
             </span>
             {running && onStop ? (
@@ -1085,6 +1086,7 @@ function RunningSession({ repo, tab, sessionId, compact, onExpand }: { repo: Rep
     history: c.messages.filter((m) => m.role === 'user').map((m) => m.content).reverse(),
     menu,
     setMenu,
+    suggestion: c.nextPrompt,
   };
   const changesButton = editing ? (
     <Button size="sm" variant="ghost" className={cn(!compact && 'xl:hidden', showChanges && 'bg-hull-2')} onClick={() => setShowChanges(!showChanges)} aria-expanded={showChanges}>

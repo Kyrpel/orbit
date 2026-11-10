@@ -530,7 +530,7 @@ function TermInput({ external, active, placeholder, ...opts }: PromptOptions & {
             {...p.textarea}
             data-term-focus
             rows={1}
-            placeholder={p.dragging ? 'Drop the image to attach it' : placeholder}
+            placeholder={p.dragging ? 'Drop the image to attach it' : (p.ghost ?? placeholder)}
             aria-label={`Message for ${opts.repo.name}`}
             autoFocus={active}
             spellCheck={false}
@@ -577,9 +577,13 @@ function TermInput({ external, active, placeholder, ...opts }: PromptOptions & {
         </div>
       ) : (
         <div className="flex flex-wrap items-baseline justify-between gap-x-[2ch] px-[1ch] pt-[0.15em]">
-          <button type="button" onClick={p.cycleMode} className={cn('text-left', line.tone)} title="Change mode (shift+tab)">
-            {line.text}
-          </button>
+          {p.ghost ? (
+            <span className="t-dim">tab to use the suggestion</span>
+          ) : (
+            <button type="button" onClick={p.cycleMode} className={cn('text-left', line.tone)} title="Change mode (shift+tab)">
+              {line.text}
+            </button>
+          )}
           {!opts.security ? (
             <span className="t-dim">
               <button type="button" onClick={() => p.openMenu('ai')} className="hover:t-fg" title="Which AI answers (/ai)">
@@ -825,6 +829,7 @@ function TermRunning({ repo, tab, sessionId, active, onExpand }: { repo: RepoDTO
           setMenu={setMenu}
           history={history}
           active={active}
+          suggestion={c.nextPrompt}
           placeholder={running ? (c.steerable ? `Message ${ai === 'The agent' ? 'the agent' : ai}: it reads it at its next step` : 'Type a message: it is sent when the agent finishes') : ''}
           commands={{
             clear: actions.clear,

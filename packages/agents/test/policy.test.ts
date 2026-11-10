@@ -151,3 +151,14 @@ describe('step output previews', () => {
     expect(outputPreview('token sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789').text).not.toContain('abcdefghijklmnopqrstuvwxyz0123456789');
   });
 });
+
+describe('next-message suggestions', () => {
+  it('keeps one clean line, or nothing', async () => {
+    const { cleanNextPrompt } = await import('../src');
+    expect(cleanNextPrompt('"Now commit and push"')).toBe('Now commit and push');
+    expect(cleanNextPrompt('\nYou: yes, add the tests\nmore')).toBe('yes, add the tests');
+    expect(cleanNextPrompt('None.')).toBeNull();
+    expect(cleanNextPrompt('   ')).toBeNull();
+  });
+});
+

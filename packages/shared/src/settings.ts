@@ -42,6 +42,8 @@ const ExecutionSettings = z.object({
   allowAgentNetwork: z.boolean().default(false),
   /** How new working sessions handle commands: ask first, or auto (Claude Code's auto mode). */
   sessionCommands: z.enum(['ask', 'auto']).default('ask'),
+  /** After each answer, suggest your likely next message (a small, cheap model call), like Claude Code. */
+  suggestNext: z.boolean().default(true),
 });
 
 const ModelSettings = z.object({
