@@ -386,14 +386,16 @@ export const conversations = sqliteTable(
     /** Empty means every connected project. */
     repoIds: text('repo_ids', { mode: 'json' }).$type<string[]>().notNull().default(sql`'[]'`),
     mode: text('mode').$type<'edit' | 'ask'>().notNull().default('ask'),
-    provider: text('provider').$type<'auto' | 'claude' | 'codex'>().notNull().default('auto'),
+    provider: text('provider').$type<'auto' | 'claude' | 'codex' | 'openrouter' | 'huggingface'>().notNull().default('auto'),
     agentSessionId: text('agent_session_id'),
     agentRuntime: text('agent_runtime'),
     allowedCommands: text('allowed_commands', { mode: 'json' }).$type<string[]>().notNull().default(sql`'[]'`),
     /** Which agent seat runs this session: the session agent, or the security reviewer for security checks. */
     seat: text('seat').$type<'assistant' | 'security'>().notNull().default('assistant'),
     /** `ask`: commands need approval. `auto`: Claude Code's auto mode decides. */
-    permissionMode: text('permission_mode').$type<'ask' | 'auto'>().notNull().default('ask'),
+    permissionMode: text('permission_mode').$type<'ask' | 'auto' | 'plan'>().notNull().default('ask'),
+    /** The message holding the agent's /compact summary: everything before it is out of the agent's context. */
+    compactFrom: text('compact_from'),
     /** This session's own model (overrides the session agent's model for that AI); null = default. */
     model: text('model'),
     /** This session's own reasoning effort; null = the session agent's effort. */
@@ -421,6 +423,12 @@ export const conversationMessages = sqliteTable(
     blocked: text('blocked', { mode: 'json' }).$type<BlockedCommand[] | null>(),
     /** Images attached to a user message; the files live in ORBIT_HOME/uploads/<conversation>/. */
     attachments: text('attachments', { mode: 'json' }).$type<StoredAttachment[] | null>(),
+    /** What the answer used (tokens, cost, context size), for /cost and /context. */
+    usage: text('usage', { mode: 'json' }).$type<MessageUsage | null>(),
+    /** Whether this answer was actually generated in plan mode. */
+    kind: text('kind').$type<'chat' | 'plan'>().notNull().default('chat'),
+    /** A saved copy of the project's files from just before this message was handled (/rewind). */
+    checkpoint: text('checkpoint'),
     durationMs: integer('duration_ms'),
     createdAt: createdAt(),
     finishedAt: text('finished_at'),
@@ -445,6 +453,17 @@ export const conversationEvents = sqliteTable(
   },
   (t) => [index('conversation_events_conv').on(t.conversationId, t.id)],
 );
+
+/** What an answer used, as stored with its message. */
+export interface MessageUsage {
+  costUsd: number | null;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  contextTokens: number | null;
+  contextWindow: number | null;
+}
 
 /** An attached image as stored: `file` is its name inside the conversation's upload folder. */
 export interface StoredAttachment {

@@ -30,6 +30,8 @@
   /* AI providers: who is doing the work, at a glance. */
   --color-claude: #b65e26;
   --color-codex: #2e62cf;
+  --color-openrouter: #5b5bd6;
+  --color-huggingface: #b7791f;
 
   --font-sans: 'Recursive Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
   --font-mono: 'Recursive Variable', ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
@@ -154,6 +156,8 @@ html[data-theme='terminal'] {
   --color-fault: #ff6b80;
   --color-claude: #d77757;
   --color-codex: #7aa5ff;
+  --color-openrouter: #a5a6ff;
+  --color-huggingface: #ffd21e;
   --font-sans: var(--t-font);
   --font-mono: var(--t-font);
   color-scheme: dark;

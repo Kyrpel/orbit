@@ -78,21 +78,24 @@ const schemas = {
     images: z.array(z.object({ name: z.string().max(200), mediaType: z.enum(CHAT_IMAGE_TYPES), data: z.string().min(1).max(7_200_000) })).max(6).optional(),
     repoIds: z.array(z.string()).max(50).optional(),
     mode: z.enum(['edit', 'ask']).optional(),
-    provider: z.enum(['auto', 'claude', 'codex']).optional(),
-    permissionMode: z.enum(['ask', 'auto']).optional(),
+    provider: z.enum(['auto', 'claude', 'codex', 'openrouter', 'huggingface']).optional(),
+    permissionMode: z.enum(['ask', 'auto', 'plan']).optional(),
     /** While the agent is busy: interrupt it and send this right away (otherwise it is queued). */
     now: z.boolean().optional(),
     model: z.string().max(120).nullish(),
     effort: z.enum(EFFORT_LEVELS).nullish(),
   }),
   patchChat: z.object({
-    provider: z.enum(['auto', 'claude', 'codex']).optional(),
+    provider: z.enum(['auto', 'claude', 'codex', 'openrouter', 'huggingface']).optional(),
     mode: z.enum(['edit', 'ask']).optional(),
     title: z.string().max(200).optional(),
-    permissionMode: z.enum(['ask', 'auto']).optional(),
+    permissionMode: z.enum(['ask', 'auto', 'plan']).optional(),
     model: z.string().max(120).nullish(),
     effort: z.enum(EFFORT_LEVELS).nullish(),
   }),
+  compactChat: z.object({ focus: z.string().max(500).optional() }),
+  rewindChat: z.object({ messageId: z.string().min(1).max(100), code: z.boolean().default(false), conversation: z.boolean().default(false) }),
+  shell: z.object({ command: z.string().min(1).max(4100), chatId: z.string().max(100).nullish() }),
   allowCommand: z.object({ command: z.string().min(1).max(4000) }),
   approveChat: z.object({ decision: z.enum(['accept', 'acceptForSession', 'decline']) }),
   plugin: z.object({ id: z.string().min(3).max(300).regex(/^[\w.-]+@[\w.-]+$/, 'A plugin id looks like name@marketplace.') }),
@@ -100,7 +103,8 @@ const schemas = {
   marketplace: z.object({ source: z.string().min(3).max(500) }),
   commit: z.object({ message: z.string().min(1).max(5000) }),
   applyTask: z.object({ title: z.string().min(1).max(500), description: z.string().max(60_000) }),
-  improveText: z.object({ text: z.string().min(1).max(20_000), repoId: z.string().nullish() }),
+  // `openrouter`: the session uses OpenRouter, so its model (null: the first one) does the rewrite.
+  improveText: z.object({ text: z.string().min(1).max(20_000), repoId: z.string().nullish(), gateway: z.object({ provider: z.enum(['openrouter', 'huggingface']), model: z.string().max(300).nullable() }).nullish() }),
 };
 
 function body<T extends z.ZodType>(schema: T, req: FastifyRequest): z.infer<T> {
@@ -224,6 +228,9 @@ export async function buildApp(orbit: Orbit, opts: AppOptions): Promise<FastifyI
   app.post('/api/chats/:id/approval', async (req) => orbit.chat.approve((req.params as { id: string }).id, body(schemas.approveChat, req).decision));
   app.post('/api/chats/:id/allow', async (req) => orbit.chat.allow((req.params as { id: string }).id, body(schemas.allowCommand, req).command));
   app.post('/api/chats/:id/allow-all', async (req) => orbit.chat.allowAll((req.params as { id: string }).id));
+  // /compact and /rewind in a session.
+  app.post('/api/chats/:id/compact', async (req) => orbit.chat.compact((req.params as { id: string }).id, body(schemas.compactChat, req).focus ?? ''));
+  app.post('/api/chats/:id/rewind', async (req) => orbit.chat.rewind((req.params as { id: string }).id, body(schemas.rewindChat, req)));
   app.delete('/api/chats/:id/messages/:messageId', async (req) => {
     const p = req.params as { id: string; messageId: string };
     return orbit.chat.unqueue(p.id, p.messageId);
@@ -233,6 +240,38 @@ export async function buildApp(orbit: Orbit, opts: AppOptions): Promise<FastifyI
   app.get('/api/repos/:id/changes', async (req) => orbit.changes((req.params as { id: string }).id));
   app.post('/api/repos/:id/commit', async (req) => orbit.commit((req.params as { id: string }).id, body(schemas.commit, req).message));
   app.post('/api/repos/:id/security-check', async (req, reply) => reply.code(201).send(await orbit.chat.securityCheck((req.params as { id: string }).id)));
+  // `!command` and `@file` in the session prompt.
+  app.post('/api/repos/:id/shell', async (req) => {
+    const b = body(schemas.shell, req);
+    return orbit.chat.shell({ repoId: (req.params as { id: string }).id, command: b.command, chatId: b.chatId ?? null });
+  });
+  // OpenRouter: other models inside Claude Code sessions. The key goes in, never comes back out.
+  app.get('/api/openrouter', async () => orbit.openrouter.status());
+  app.post('/api/openrouter/key', async (req) => orbit.openrouter.connect(body(z.object({ key: z.string().min(1).max(400) }), req).key));
+  app.delete('/api/openrouter/key', async () => orbit.openrouter.disconnect());
+  app.post('/api/openrouter/models', async (req) => orbit.openrouter.addModel(body(z.object({ model: z.string().min(3).max(300) }), req).model));
+  app.post('/api/openrouter/models/instructions', async (req) => {
+    const b = body(z.object({ model: z.string().min(3).max(300), instructions: z.string().max(60_000) }), req);
+    return orbit.openrouter.setInstructions(b.model, b.instructions);
+  });
+  app.post('/api/openrouter/models/remove', async (req) => orbit.openrouter.removeModel(body(z.object({ model: z.string().min(3).max(300) }), req).model));
+  // Hugging Face: your own models on rented GPUs. The token goes in, never comes back out.
+  app.get('/api/huggingface', async () => orbit.huggingface.status());
+  app.post('/api/huggingface/token', async (req) => orbit.huggingface.connect(body(z.object({ token: z.string().min(1).max(400) }), req).token));
+  app.delete('/api/huggingface/token', async () => orbit.huggingface.disconnect());
+  app.post('/api/huggingface/plan', async (req) => orbit.huggingface.plan(body(z.object({ model: z.string().min(3).max(500) }), req).model));
+  app.post('/api/huggingface/endpoints', async (req) =>
+    orbit.huggingface.create(body(z.object({ repository: z.string().min(3).max(300), file: z.string().min(5).max(300), hardwareId: z.string().min(3).max(120), name: z.string().max(32).optional(), sleepAfterMinutes: z.number().int().min(5).max(1440).optional() }), req)),
+  );
+  app.post('/api/huggingface/endpoints/:name/pause', async (req) => orbit.huggingface.pause((req.params as { name: string }).name));
+  app.post('/api/huggingface/endpoints/:name/resume', async (req) => orbit.huggingface.resume((req.params as { name: string }).name));
+  app.delete('/api/huggingface/endpoints/:name', async (req) => orbit.huggingface.remove((req.params as { name: string }).name));
+  app.post('/api/huggingface/endpoints/:name/instructions', async (req) => orbit.huggingface.setInstructions((req.params as { name: string }).name, body(z.object({ instructions: z.string().max(60_000) }), req).instructions));
+  app.get('/api/past-sessions', async (req) => {
+    const q = req.query as { q?: string; repoId?: string; limit?: string };
+    return orbit.pastSessions({ q: String(q.q ?? '').slice(0, 200), repoId: q.repoId ? String(q.repoId) : null, limit: Number(q.limit) || 30 });
+  });
+  app.get('/api/repos/:id/files', async (req) => orbit.files((req.params as { id: string }).id, String((req.query as { q?: string }).q ?? '').slice(0, 200)));
 
   // Prompt engineer: rewrite rough tasks (or a request in the workspace) into clear ones.
   app.post('/api/projects/:id/tasks/:taskId/improve', async (req) => {
@@ -245,7 +284,7 @@ export async function buildApp(orbit: Orbit, opts: AppOptions): Promise<FastifyI
   });
   app.post('/api/prompts/improve', async (req) => {
     const b = body(schemas.improveText, req);
-    return orbit.prompter.improveText({ text: b.text, repoId: b.repoId ?? null });
+    return orbit.prompter.improveText({ text: b.text, repoId: b.repoId ?? null, gateway: b.gateway ?? null });
   });
   app.post('/api/chats/:id/cancel', async (req, reply) => {
     orbit.chat.cancel((req.params as { id: string }).id);

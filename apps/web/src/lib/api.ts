@@ -13,6 +13,7 @@ import type {
   MissionEventDTO,
   MissionSummaryDTO,
   OverviewDTO,
+  PastSessionsDTO,
   ReceiptDTO,
   RepoChangesDTO,
   RepoDTO,
@@ -89,6 +90,7 @@ export const keys = {
   activity: ['activity'] as const,
   github: ['github-repos'] as const,
   receipt: (id: string) => ['receipt', id] as const,
+  past: (q: string, repoId: string | null) => ['past-sessions', q, repoId ?? 'none'] as const,
 };
 
 export function useSession() {
@@ -142,6 +144,15 @@ export const useSkillDetails = (id: string | null) =>
 export const useChanges = (repoId: string | null, enabled = true) =>
   useQuery({ queryKey: keys.changes(repoId ?? 'none'), queryFn: () => api<RepoChangesDTO>(`/api/repos/${repoId}/changes`), enabled: !!repoId && enabled, staleTime: 2_000 });
 export const useChat = (id: string | null) => useQuery({ queryKey: keys.chat(id ?? 'none'), queryFn: () => api<ConversationDetailDTO>(`/api/chats/${id}`), enabled: !!id });
+/** Your Claude Code and Codex sessions from outside Orbit (this project's folder first). */
+export const usePastSessions = (q: string, repoId: string | null, enabled = true) =>
+  useQuery({
+    queryKey: keys.past(q, repoId),
+    queryFn: () => api<PastSessionsDTO>(`/api/past-sessions?q=${encodeURIComponent(q)}${repoId ? `&repoId=${encodeURIComponent(repoId)}` : ''}&limit=30`),
+    enabled,
+    staleTime: 15_000,
+    placeholderData: (prev) => prev,
+  });
 export const useActivity = () => useQuery({ queryKey: keys.activity, queryFn: () => api<ActivityItem[]>('/api/activity?limit=200') });
 export const useReceipt = (id: string, enabled: boolean) => useQuery({ queryKey: keys.receipt(id), queryFn: () => api<ReceiptDTO>(`/api/missions/${id}/receipt`), enabled });
 

@@ -4,16 +4,22 @@ import {
   ASSISTANT_SYSTEM,
   assistantPrompt,
   cleanNextPrompt,
+  compactPrompt,
   NEXT_PROMPT_SYSTEM,
   nextPromptPrompt,
+  pastSessionBlock,
+  pastSessionsBrief,
+  pastSessionsSystem,
   deniedCommandReason,
   isAllowableCommand,
   parseAssistantReply,
   SECURITY_CHAT_SYSTEM,
   securityCheckMessage,
+  SESSION_PLAN_SYSTEM,
   SESSION_READONLY_SYSTEM,
   SESSION_SYSTEM,
   sessionPrompt,
+  shellContext,
   type AgentImage,
   type AgentRunRequest,
   type AgentRunResult,
@@ -22,7 +28,7 @@ import {
   type SteerFn,
   type AssistantProject,
 } from '@orbit/agents';
-import { asc, desc, eq, inArray, conversationEvents, conversationMessages, conversations, type ConversationMessageRow, type ConversationRow, type StoredAttachment } from '@orbit/database';
+import { asc, desc, eq, inArray, conversationEvents, conversationMessages, conversations, type ConversationMessageRow, type ConversationRow, type MessageUsage, type StoredAttachment } from '@orbit/database';
 import {
   CHAT_IMAGE_LIMITS,
   CHAT_IMAGE_TYPES,
@@ -32,6 +38,7 @@ import {
   type EffortLevel,
   OrbitError,
   redactSecrets,
+  modelProvider,
   truncate,
   type BlockedCommand,
   type ChatEventDTO,
@@ -48,9 +55,13 @@ import {
   type SessionPermissionMode,
 } from '@orbit/shared';
 import { agentEventRecord } from './agent-events';
+import { checkpointRef, dropCheckpoints, restoreCheckpoint, takeCheckpoint } from './checkpoints';
+import type { GatewayProvider } from './gateways';
+import { pastRefs, type PastSessions } from './past-sessions';
 import { audit, nowIso, type OrbitContext } from './context';
 import type { RepoService } from './repos';
 import { forgetResolvedRuntime } from './runtimes';
+import { runShellCommand } from './shell';
 import { forgetCodexAvailability, planSeat, type SeatCandidate } from './team';
 import { repoChanges } from './workspace';
 
@@ -62,6 +73,15 @@ const SESSION_TIMEOUT_MS = 24 * 60 * 60_000;
 const SESSION_MAX_TURNS = 2000;
 
 type Provider = ConversationSummaryDTO['provider'];
+
+/** What a session agent gets of your sessions outside Orbit (see `PastSessions`). */
+interface PastContext {
+  /** The library folder: readable, never writable. */
+  dir: string;
+  system: string;
+  /** Your latest sessions in the project's folder, for the first message. */
+  brief: string;
+}
 
 export interface StartSessionInput {
   message: string;
@@ -97,11 +117,25 @@ export class ChatService {
   private readonly nextPrompts = new Map<string, { after: string; text: string }>();
   /** Requests the agent is waiting on, oldest first (Codex asking to run what its sandbox blocks). */
   private readonly approvals = new Map<string, { dto: SessionApprovalDTO; messageId: string; runId: string; resolve: (d: ApprovalDecision) => void }[]>();
+  /** Sessions whose current answer is a /compact summary (read-only; it replaces the agent's context). */
+  private readonly compacting = new Set<string>();
+  /** Projects the active run may write, independent of settings chosen for the next run. */
+  private readonly writingProjects = new Map<string, string[]>();
+  /** What the agent must be told on its next message (for example that you rewound its file changes). */
+  private readonly pendingNotes = new Map<string, string>();
 
   constructor(
     private readonly ctx: OrbitContext,
     private readonly repos: RepoService,
+    private readonly past: PastSessions | null = null,
+    /** OpenRouter and your Hugging Face endpoints: AIs that run in Claude Code's tools with their own key. */
+    private readonly gateways: GatewayProvider[] = [],
   ) {}
+
+  /** The gateway a session's AI choice means (OpenRouter, Hugging Face), or null for Claude, Codex and Auto. */
+  private gatewayFor(provider: string): GatewayProvider | null {
+    return this.gateways.find((g) => g.id === provider) ?? null;
+  }
 
   list(limit = 200): ConversationSummaryDTO[] {
     const rows = this.ctx.db.select().from(conversations).orderBy(desc(conversations.updatedAt)).limit(limit).all();
@@ -117,7 +151,7 @@ export class ChatService {
     const events = this.ctx.db.select().from(conversationEvents).where(eq(conversationEvents.conversationId, id)).orderBy(asc(conversationEvents.id)).all();
     return {
       ...this.summary(row, msgs),
-      messages: msgs.map(toMessageDTO),
+      messages: msgs.map((m) => toMessageDTO(m, row.compactFrom)),
       events: events.map((e) => ({ id: e.id, conversationId: e.conversationId, messageId: e.messageId, ts: e.ts, kind: e.kind as MissionEventKind, actor: e.actor as ChatEventDTO['actor'], title: e.title, detail: e.detail, data: e.data })),
       approval: this.approvals.get(id)?.[0]?.dto ?? null,
       nextPrompt: this.nextPromptFor(id, msgs),
@@ -223,7 +257,12 @@ export class ChatService {
     if (patch.effort !== undefined && (patch.effort ?? null) !== row.effort) set.effort = patch.effort ?? null;
     if (patch.permissionMode && patch.permissionMode !== row.permissionMode) {
       set.permissionMode = patch.permissionMode;
-      audit(this.ctx, { actor: 'user', action: 'session.permission_mode', target: id, summary: `Commands in a working session: ${patch.permissionMode === 'auto' ? 'auto (safety-checked)' : 'ask first'}` });
+      audit(this.ctx, {
+        actor: 'user',
+        action: 'session.permission_mode',
+        target: id,
+        summary: `Working session mode: ${patch.permissionMode === 'auto' ? 'auto-accept (safety-checked)' : patch.permissionMode === 'plan' ? 'plan (read-only until you approve)' : 'ask first'}`,
+      });
     }
     if (Object.keys(set).length) {
       this.ctx.db.update(conversations).set(set).where(eq(conversations.id, id)).run();
@@ -297,9 +336,19 @@ export class ChatService {
   }
 
   remove(id: string): void {
-    this.row(id);
+    const row = this.row(id);
     this.dropApprovals(id);
     this.running.get(id)?.abort();
+    // Its saved copies of the project's files (for /rewind) go too.
+    if (row.repoIds[0]) {
+      try {
+        void dropCheckpoints(this.ctx.git, this.repos.getRow(row.repoIds[0]).localPath, id);
+      } catch {
+        /* the project is no longer connected */
+      }
+    }
+    this.compacting.delete(id);
+    this.pendingNotes.delete(id);
     this.ctx.db.delete(conversations).where(eq(conversations.id, id)).run();
     rmSync(path.join(this.ctx.paths.uploads, id), { recursive: true, force: true });
     this.ctx.bus.publish({ type: 'chat.updated', conversationId: id });
@@ -331,11 +380,119 @@ export class ChatService {
 
   /** True while a working session is changing this project. */
   isEditing(repoId: string): boolean {
-    for (const id of this.running.keys()) {
-      const row = this.ctx.db.select().from(conversations).where(eq(conversations.id, id)).get();
-      if (row?.mode === 'edit' && row.repoIds.includes(repoId)) return true;
+    return [...this.writingProjects.values()].some((ids) => ids.includes(repoId));
+  }
+
+  /**
+   * /compact: the agent writes its own summary of the session, and from the next message on its
+   * context starts from that summary instead of the whole conversation (frees its context window,
+   * like Claude Code's /compact). Works the same for Claude and Codex.
+   */
+  compact(id: string, focus = ''): ConversationDetailDTO {
+    this.row(id);
+    if (this.running.has(id)) throw new OrbitError('CONFLICT', 'Wait for the agent to finish (or stop it), then compact.');
+    if (!this.messages(id).some((m) => m.role === 'assistant' && m.status === 'done' && m.runtime !== 'shell')) {
+      throw new OrbitError('PRECONDITION', 'There is nothing to compact yet: send a message first.');
     }
-    return false;
+    const note = focus.trim().slice(0, 500);
+    this.compacting.add(id);
+    this.ask(id, note ? `/compact ${note}` : '/compact', compactPrompt(note));
+    return this.detail(id);
+  }
+
+  /**
+   * /rewind: go back to just before one of your messages. `code` puts the project's files back as
+   * they were then (from the copy Orbit saved before that message was handled); `conversation`
+   * removes that message and everything after it, and the agent re-reads the conversation so far.
+   * Commits the agent made stay. Returns your message, so it can go back into the prompt.
+   */
+  async rewind(id: string, input: { messageId: string; code: boolean; conversation: boolean }): Promise<{ chat: ConversationDetailDTO; message: string }> {
+    const row = this.row(id);
+    if (this.running.has(id)) throw new OrbitError('CONFLICT', 'Stop the agent first, then rewind.');
+    if (!input.code && !input.conversation) throw new OrbitError('VALIDATION', 'Choose what to rewind: the code, the conversation, or both.');
+    const msgs = this.messages(id);
+    const at = msgs.findIndex((m) => m.id === input.messageId && m.role === 'user');
+    if (at < 0) throw new OrbitError('NOT_FOUND', 'Message not found.');
+    const target = msgs[at]!;
+    if (input.code) {
+      if (row.mode !== 'edit') throw new OrbitError('PRECONDITION', 'Only working sessions change files.');
+      if (!target.checkpoint) throw new OrbitError('PRECONDITION', 'Orbit has no saved copy of the files from before this message.');
+      const repo = this.repos.getRow(row.repoIds[0]!);
+      if (!repo.allowModify) throw new OrbitError('FORBIDDEN', `${repo.name} is read-only in Orbit.`);
+      if (this.isEditing(repo.id)) throw new OrbitError('CONFLICT', 'Another session is still changing this project. Stop it first, then rewind.');
+      const res = await restoreCheckpoint(this.ctx.git, repo.localPath, target.checkpoint).catch((err: Error) => {
+        throw new OrbitError('CONFLICT', `Could not restore the files: ${redactSecrets(err.message).slice(0, 300)}`);
+      });
+      audit(this.ctx, { actor: 'user', action: 'session.rewind_code', target: id, summary: `Rewound ${repo.name} to before: ${truncate(target.content, 120)}`, details: { restored: res.restored, removed: res.removed.length } });
+      this.ctx.bus.publish({ type: 'repo.changed', repoId: repo.id });
+    }
+    if (input.conversation) {
+      const drop = msgs.slice(at).map((m) => m.id);
+      this.ctx.db.delete(conversationEvents).where(inArray(conversationEvents.messageId, drop)).run();
+      this.ctx.db.delete(conversationMessages).where(inArray(conversationMessages.id, drop)).run();
+      // The agent's own session still remembers the removed messages: it starts a fresh one from what is left.
+      this.ctx.db
+        .update(conversations)
+        .set({ agentSessionId: null, ...(row.compactFrom && drop.includes(row.compactFrom) ? { compactFrom: null } : {}) })
+        .where(eq(conversations.id, id))
+        .run();
+      this.nextPrompts.delete(id);
+      this.pendingNotes.delete(id);
+      audit(this.ctx, { actor: 'user', action: 'session.rewind_conversation', target: id, summary: `Rewound a session to before: ${truncate(target.content, 120)}`, details: { removed: drop.length } });
+    } else {
+      this.pendingNotes.set(id, `The developer rewound your file changes to how the project was just before their message "${truncate(target.content.replace(/\s+/g, ' '), 120)}". Whatever you changed after that point is undone: do not assume it is still there.\n\n`);
+    }
+    this.touch(id);
+    return { chat: this.detail(id), message: target.content };
+  }
+
+  /**
+   * `!command` in the prompt, like Claude Code's bash mode: runs the command in the project right
+   * now, shows its output in the session, and tells the agent about it with your next message.
+   * Without a session yet, one is created to hold it. Returns at once; the output arrives when done.
+   */
+  shell(input: { repoId: string; command: string; chatId?: string | null }): ConversationDetailDTO {
+    const repo = this.repos.getRow(input.repoId);
+    if (!repo.allowModify) throw new OrbitError('FORBIDDEN', `${repo.name} is read-only in Orbit.`, { hint: 'Allow changes for it in Projects, or run the command in a terminal.' });
+    const command = input.command.replace(/^\s*!\s*/, '').trim();
+    if (!command) throw new OrbitError('VALIDATION', 'Type a command after the ! first.');
+    let id = input.chatId ?? null;
+    if (id) {
+      const row = this.row(id);
+      if (!row.repoIds.includes(repo.id)) throw new OrbitError('VALIDATION', 'This session belongs to another project.');
+      if (this.running.has(id)) throw new OrbitError('CONFLICT', 'The agent is working. Wait for it, or press Esc to stop it, then run your command.');
+    } else {
+      id = newId('chat');
+      const ts = nowIso(this.ctx);
+      this.ctx.db
+        .insert(conversations)
+        .values({ id, title: titleFrom(`!${command}`), repoIds: [repo.id], mode: repo.allowModify && repo.isGit ? 'edit' : 'ask', provider: 'auto', permissionMode: this.ctx.settings.get().execution.sessionCommands, allowedCommands: [], createdAt: ts, updatedAt: ts })
+        .run();
+    }
+    const chatId = id;
+    const ts = nowIso(this.ctx);
+    const outId = newId('msg');
+    this.ctx.db.insert(conversationMessages).values({ id: newId('msg'), conversationId: chatId, role: 'user', content: `!${command}`, status: 'done', createdAt: ts, finishedAt: ts }).run();
+    this.ctx.db.insert(conversationMessages).values({ id: outId, conversationId: chatId, role: 'assistant', content: '', status: 'running', runtime: 'shell', createdAt: nowIso(this.ctx) }).run();
+    audit(this.ctx, { actor: 'user', action: 'session.shell', target: repo.id, summary: `Ran a command from the prompt in ${repo.name}: ${truncate(redactSecrets(command), 200)}` });
+    this.nextPrompts.delete(chatId);
+    this.touch(chatId);
+    const controller = new AbortController();
+    this.running.set(chatId, controller);
+    this.writingProjects.set(chatId, [repo.id]);
+    void runShellCommand(this.ctx, repo.localPath, command, controller.signal)
+      .then((res) => {
+        const status = res.cancelled ? 'cancelled' : res.exitCode === 0 ? 'done' : 'failed';
+        const error = res.cancelled ? 'Stopped.' : res.timedOut ? 'Stopped after 2 minutes.' : res.exitCode === 0 ? undefined : `Exit code ${res.exitCode ?? '?'}`;
+        this.finish(outId, { status, content: res.output, ...(error ? { error } : {}), durationMs: res.durationMs });
+      })
+      .catch((err: Error) => this.finish(outId, { status: 'failed', content: '', error: redactSecrets(err.message) }))
+      .finally(() => {
+        this.running.delete(chatId);
+        this.writingProjects.delete(chatId);
+        this.afterRun(chatId);
+      });
+    return this.detail(chatId);
   }
 
   // ---------------------------------------------------------------------------
@@ -357,24 +514,55 @@ export class ChatService {
     this.touch(conversationId);
     const controller = new AbortController();
     this.running.set(conversationId, controller);
+    const conv = this.row(conversationId);
+    if (conv.mode === 'edit' && conv.permissionMode !== 'plan' && !this.compacting.has(conversationId)) this.writingProjects.set(conversationId, conv.repoIds);
     void this.answer(conversationId, answerId, text, controller.signal, userIds)
       .catch((err: Error) => {
         this.finish(answerId, { status: 'failed', error: redactSecrets(err.message) });
       })
       .finally(() => {
         this.running.delete(conversationId);
-        const conv = this.ctx.db.select().from(conversations).where(eq(conversations.id, conversationId)).get();
-        if (conv?.mode === 'edit') for (const repoId of conv.repoIds) this.ctx.bus.publish({ type: 'repo.changed', repoId });
-        // Messages sent while the agent was busy go out now, together, as the next turn.
-        const queued = conv ? this.messages(conversationId).filter((m) => m.role === 'user' && m.status === 'queued') : [];
-        if (queued.length) {
-          const ts = nowIso(this.ctx);
-          for (const m of queued) this.ctx.db.update(conversationMessages).set({ status: 'done', finishedAt: ts }).where(eq(conversationMessages.id, m.id)).run();
-          this.startTurn(conversationId, queued.map((m) => m.content).join('\n\n'), queued.map((m) => m.id));
-          return;
-        }
-        this.touch(conversationId);
+        this.writingProjects.delete(conversationId);
+        this.compacting.delete(conversationId);
+        this.afterRun(conversationId);
       });
+  }
+
+  /** After an agent turn or a `!` command: tell the dashboard, and send what was queued meanwhile. */
+  private afterRun(conversationId: string): void {
+    const conv = this.ctx.db.select().from(conversations).where(eq(conversations.id, conversationId)).get();
+    if (conv?.mode === 'edit') for (const repoId of conv.repoIds) this.ctx.bus.publish({ type: 'repo.changed', repoId });
+    // Messages sent while the agent was busy go out now, together, as the next turn.
+    const queued = conv ? this.messages(conversationId).filter((m) => m.role === 'user' && m.status === 'queued') : [];
+    if (queued.length) {
+      const ts = nowIso(this.ctx);
+      for (const m of queued) this.ctx.db.update(conversationMessages).set({ status: 'done', finishedAt: ts }).where(eq(conversationMessages.id, m.id)).run();
+      this.startTurn(conversationId, queued.map((m) => m.content).join('\n\n'), queued.map((m) => m.id));
+      return;
+    }
+    this.touch(conversationId);
+  }
+
+  /** The agent's own summary from the last /compact, if the session has one. */
+  private compactSummary(conversationId: string): string | null {
+    const from = this.row(conversationId).compactFrom;
+    if (!from) return null;
+    return this.ctx.db.select().from(conversationMessages).where(eq(conversationMessages.id, from)).get()?.content.trim() || null;
+  }
+
+  /** Commands you ran with `!` since the agent last answered, newest last. */
+  private shellSinceLastAnswer(msgs: ConversationMessageRow[], currentId: string): { command: string; output: string; exitCode: number | null }[] {
+    const runs: { command: string; output: string; exitCode: number | null }[] = [];
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i]!;
+      if (m.role !== 'assistant' || m.id === currentId) continue;
+      if (m.runtime !== 'shell') break;
+      const asked = msgs[i - 1];
+      if (m.status === 'running' || asked?.role !== 'user') continue;
+      const code = /^Exit code (\d+)/.exec(m.error ?? '')?.[1];
+      runs.unshift({ command: asked.content.replace(/^!/, ''), output: m.content, exitCode: code ? Number(code) : null });
+    }
+    return runs;
   }
 
   private async answer(conversationId: string, messageId: string, message: string, signal: AbortSignal, userIds: string[]): Promise<void> {
@@ -384,7 +572,16 @@ export class ChatService {
       this.finish(messageId, { status: 'failed', error: 'This project is no longer connected. Add it again in Projects.' });
       return;
     }
-    const plan = await planSeat(this.ctx, conv.seat === 'security' ? 'security' : 'assistant', conv.provider);
+    // OpenRouter or your Hugging Face endpoint: that AI only, never another one in its place. A
+    // sleeping endpoint wakes first, and the session says so while it waits.
+    const gw = conv.seat !== 'security' ? this.gatewayFor(conv.provider) : null;
+    const plan = gw
+      ? { primary: (await gw.seat(conv.model, { signal, onProgress: (title) => this.event(conversationId, messageId, { kind: 'note', actor: 'system', title, data: null }) })).candidate, fallback: null }
+      : await planSeat(this.ctx, conv.seat === 'security' ? 'security' : 'assistant', conv.provider === 'claude' || conv.provider === 'codex' ? conv.provider : 'auto');
+    if (signal.aborted) {
+      this.finish(messageId, { status: 'cancelled' });
+      return;
+    }
     if (!plan.primary || !plan.primary.availability.available) {
       this.finish(messageId, {
         status: 'failed',
@@ -392,29 +589,54 @@ export class ChatService {
       });
       return;
     }
+    const all = this.messages(conversationId);
+    const compacting = this.compacting.has(conversationId);
+    // After /compact the agent's context starts from its own summary: only later messages travel as history.
+    const compactAt = conv.compactFrom ? all.findIndex((m) => m.id === conv.compactFrom) : -1;
     // The messages being answered travel in the prompt itself, not in the history.
-    const history = this.messages(conversationId)
+    const history = all
+      .slice(compactAt + 1)
       .filter((m) => (m.status === 'done' || m.status === 'steered') && m.id !== messageId && !userIds.includes(m.id))
       .map((m) => ({ role: m.role, content: m.content }));
+    // Read-only conversations have no summary slot in their prompt: it leads their history instead.
+    const summary = compactAt >= 0 ? (all[compactAt]?.content.trim() ?? '') : '';
+    if (conv.mode === 'ask' && summary) history.unshift({ role: 'assistant', content: `[Summary of the earlier conversation] ${summary}` });
+    // What you did yourself since the agent last answered (`!` commands, a rewind) is told to it with this message.
+    const note = this.pendingNotes.get(conversationId) ?? '';
+    this.pendingNotes.delete(conversationId);
+    const past = await this.pastContext(conv, projects, signal);
+    const told = `${shellContext(this.shellSinceLastAnswer(all, messageId))}${note}${past ? this.pastReferences(conversationId, messageId, message) : ''}${message}`;
+
+    // Before an agent that may change files starts, save them, so /rewind can bring them back.
+    const repo = projects[0];
+    if (conv.mode === 'edit' && conv.permissionMode !== 'plan' && !compacting && repo?.isGit && userIds[0] && !signal.aborted) {
+      const saved = await takeCheckpoint(this.ctx.git, repo.localPath, checkpointRef(conversationId, userIds[0]));
+      if (saved) this.ctx.db.update(conversationMessages).set({ checkpoint: saved }).where(eq(conversationMessages.id, userIds[0])).run();
+    }
 
     const images = this.imagesFor(conversationId, userIds);
-    let result = await this.turn(conv, messageId, withModel(plan.primary, conv.model, conv.effort), projects, message, history, signal, images);
+    let result = await this.turn(conv, messageId, withModel(plan.primary, conv.model, conv.effort), projects, told, history, signal, images, past);
     if (result.status === 'rate_limited' && plan.fallback) {
       this.event(conversationId, messageId, { kind: 'note', actor: 'system', title: `${plan.primary.label} hit its usage limit. Switching to ${plan.fallback.label}.`, detail: result.error, data: null });
-      result = await this.turn(this.row(conversationId), messageId, withModel(plan.fallback, conv.model, conv.effort), projects, message, history, signal, images);
+      result = await this.turn(this.row(conversationId), messageId, withModel(plan.fallback, conv.model, conv.effort), projects, told, history, signal, images, past);
     }
 
     const blocked = this.blockedFrom(result, this.row(conversationId));
+    const usage = usageOf(result);
     if (result.status === 'succeeded') {
       if (conv.mode === 'ask') {
         const parsed = parseAssistantReply(result.text);
-        this.finish(messageId, { status: 'done', content: parsed.answer || '(Finished without a written answer.)', suggestion: this.suggestion(parsed.mission, projects), blocked, durationMs: result.durationMs });
+        this.finish(messageId, { status: 'done', content: parsed.answer || '(Finished without a written answer.)', suggestion: this.suggestion(parsed.mission, projects), blocked, durationMs: result.durationMs, ...(usage ? { usage } : {}) });
       } else {
-        this.finish(messageId, { status: 'done', content: result.text.trim() || (blocked.length ? 'I need your OK to run a command.' : 'Done.'), blocked, durationMs: result.durationMs });
+        this.finish(messageId, { status: 'done', content: result.text.trim() || (blocked.length ? 'I need your OK to run a command.' : 'Done.'), blocked, durationMs: result.durationMs, ...(usage ? { usage } : {}) });
       }
-      if (conv.seat !== 'security' && this.ctx.settings.get().execution.suggestNext) void this.suggestNext(conversationId, messageId);
+      if (compacting && result.text.trim()) {
+        // From here on the agent's context is this summary, not the conversation: its own session ends.
+        this.ctx.db.update(conversations).set({ compactFrom: messageId, agentSessionId: null }).where(eq(conversations.id, conversationId)).run();
+      }
+      if (conv.seat !== 'security' && !compacting && this.ctx.settings.get().execution.suggestNext) void this.suggestNext(conversationId, messageId);
     } else if (result.status === 'cancelled') {
-      this.finish(messageId, { status: 'cancelled', content: result.text ? parseAssistantReply(result.text).answer : '', blocked, durationMs: result.durationMs });
+      this.finish(messageId, { status: 'cancelled', content: result.text ? parseAssistantReply(result.text).answer : '', blocked, durationMs: result.durationMs, ...(usage ? { usage } : {}) });
     } else {
       const why =
         result.status === 'rate_limited'
@@ -426,7 +648,7 @@ export class ChatService {
               : result.status === 'budget_exceeded'
                 ? 'The agent reached the spending limit for one message (Settings → Budget per agent run).'
                 : (result.error ?? 'The agent failed.');
-      this.finish(messageId, { status: 'failed', content: result.text ? result.text.trim() : '', error: truncate(redactSecrets(why), 2000), blocked, durationMs: result.durationMs });
+      this.finish(messageId, { status: 'failed', content: result.text ? result.text.trim() : '', error: truncate(redactSecrets(why), 2000), blocked, durationMs: result.durationMs, ...(usage ? { usage } : {}) });
     }
   }
 
@@ -440,16 +662,19 @@ export class ChatService {
     history: { role: 'user' | 'assistant'; content: string }[],
     signal: AbortSignal,
     images: AgentImage[],
+    past: PastContext | null,
   ): Promise<AgentRunResult> {
-    const resumeId = seat.runtime.resumable && conv.agentRuntime === seat.runtime.id ? conv.agentSessionId : null;
-    let result = await this.runOnce(conv, messageId, seat, projects, message, history, resumeId, signal, images);
+    // A gateway model keeps its own agent session: another model cannot continue one it did not write.
+    const runtimeKey = seat.gateway ? `${seat.runtime.id}:${seat.model}` : seat.runtime.id;
+    const resumeId = seat.runtime.resumable && conv.agentRuntime === runtimeKey ? conv.agentSessionId : null;
+    let result = await this.runOnce(conv, messageId, seat, projects, message, history, resumeId, signal, images, past);
     // A session can disappear (cleared by the CLI, another machine): start fresh with the history instead.
     if (resumeId && result.status === 'failed' && !result.numTurns && !signal.aborted) {
       this.event(conv.id, messageId, { kind: 'note', actor: 'system', title: 'Could not continue the previous session, so the agent starts a fresh one with the conversation so far.', detail: result.error, data: null });
-      result = await this.runOnce(conv, messageId, seat, projects, message, history, null, signal, images);
+      result = await this.runOnce(conv, messageId, seat, projects, message, history, null, signal, images, past);
     }
     if (seat.runtime.resumable && result.sessionId) {
-      this.ctx.db.update(conversations).set({ agentSessionId: result.sessionId, agentRuntime: seat.runtime.id }).where(eq(conversations.id, conv.id)).run();
+      this.ctx.db.update(conversations).set({ agentSessionId: result.sessionId, agentRuntime: runtimeKey }).where(eq(conversations.id, conv.id)).run();
     }
     return result;
   }
@@ -464,6 +689,7 @@ export class ChatService {
     resumeId: string | null,
     signal: AbortSignal,
     images: AgentImage[],
+    past: PastContext | null,
   ): Promise<AgentRunResult> {
     const settings = this.ctx.settings.get();
     const briefs: AssistantProject[] = projects.map((p) => ({
@@ -492,12 +718,30 @@ export class ChatService {
       userEnvironment: true,
       ...(images.length ? { images } : {}),
     };
-    const request: AgentRunRequest = edit
+    // Plan mode and /compact only read: the agent researches and proposes (or summarizes), and changes nothing.
+    const compacting = this.compacting.has(conv.id);
+    const readOnlyEdit = edit && (conv.permissionMode === 'plan' || compacting);
+    const writes = edit && !readOnlyEdit;
+    // Your sessions outside Orbit: a read-only folder, and a note on how to use it.
+    const pastRoots = past ? [past.dir] : [];
+    const withPast = (system: string) => (past ? `${system}\n\n${past.system}` : system);
+    const sessionBase = {
+      ...base,
+      prompt: sessionPrompt({ message, project: briefs[0]!, history: intro ? history : [], summary: intro ? this.compactSummary(conv.id) : null, intro, ...(past?.brief ? { pastSessions: past.brief } : {}) }),
+      readRoots: pastRoots,
+    };
+    const request: AgentRunRequest = readOnlyEdit
       ? {
-          ...base,
-          prompt: sessionPrompt({ message, project: briefs[0]!, history: intro ? history : [], intro }),
-          systemAppend: SESSION_SYSTEM,
-          readRoots: [],
+          ...sessionBase,
+          systemAppend: withPast(compacting ? SESSION_READONLY_SYSTEM : SESSION_PLAN_SYSTEM),
+          access: 'read-only',
+          maxTurns: compacting ? ASK_MAX_TURNS : SESSION_MAX_TURNS,
+          execution: { mode: 'trusted-local', allowNetworkTools: !compacting && settings.execution.allowAgentNetwork },
+        }
+      : writes
+        ? {
+          ...sessionBase,
+          systemAppend: withPast(SESSION_SYSTEM),
           access: 'workspace-write',
           maxTurns: SESSION_MAX_TURNS,
           // No OS sandbox for Claude here (it does not run on Windows); every command that is not
@@ -524,21 +768,35 @@ export class ChatService {
           }
         : {
           ...base,
-          prompt: intro ? assistantPrompt({ question: message, history, projects: briefs }) : message,
-          systemAppend: projects.length === 1 ? `${SESSION_READONLY_SYSTEM}\n\n${ASSISTANT_SYSTEM}` : ASSISTANT_SYSTEM,
-          readRoots: others.map((r) => r.localPath),
+          prompt: intro ? assistantPrompt({ question: message, history, projects: briefs, ...(past?.brief ? { pastSessions: past.brief } : {}) }) : message,
+          systemAppend: withPast(projects.length === 1 ? `${SESSION_READONLY_SYSTEM}\n\n${ASSISTANT_SYSTEM}` : ASSISTANT_SYSTEM),
+          readRoots: [...others.map((r) => r.localPath), ...pastRoots],
           access: 'read-only',
           maxTurns: ASK_MAX_TURNS,
           execution: { mode: 'trusted-local', allowNetworkTools: false },
         };
 
+    // OpenRouter or your Hugging Face endpoint: Claude Code runs the model with that AI's key, never your Claude login.
+    if (seat.gateway) {
+      const gateway = seat.gateway;
+      const gw = this.gateways.find((g) => g.id === modelProvider(seat.model ?? ''));
+      const info = gw && seat.model ? gw.info(seat.model) : { name: gateway.model, instructions: '' };
+      request.gateway = gateway;
+      request.model = gateway.model;
+      if (!gateway.tools) request.systemAppend = `${request.systemAppend}\n\n${TOOLLESS_NOTE}`;
+      request.systemAppend = `${request.systemAppend}\n\n${identityNote(info.name, gateway.model, gw?.servedBy ?? `served through ${gateway.name}`)}`;
+      // Your own master prompt for this model, from the Agents page.
+      if (info.instructions) request.systemAppend = `${request.systemAppend}\n\n## The developer's instructions for you (${gateway.model})\nFollow these in every answer, together with the rules above:\n${info.instructions}`;
+    }
+
     const runId = newId('run');
-    this.ctx.db.update(conversationMessages).set({ runtime: seat.runtime.id, model: seat.model }).where(eq(conversationMessages.id, messageId)).run();
+    this.ctx.db.update(conversationMessages).set({ runtime: seat.runtime.id, model: seat.model, kind: readOnlyEdit && !compacting ? 'plan' : 'chat' }).where(eq(conversationMessages.id, messageId)).run();
     const who = edit ? 'Agent' : conv.seat === 'security' ? 'Security reviewer' : 'Assistant';
+    const on = request.gateway ? `${request.gateway.model} via ${request.gateway.name}${request.gateway.tools ? '' : ', chat only'}` : `${seat.label}${seat.model ? ` · ${seat.model}` : ''}`;
     this.event(conv.id, messageId, {
       kind: 'agent',
       actor: 'assistant',
-      title: `${who} ${resumeId ? 'continued' : 'started'} (${seat.label}${seat.model ? ` · ${seat.model}` : ''})`,
+      title: `${who} ${resumeId ? 'continued' : 'started'} (${on})`,
       data: { runId, phase: 'start', runtime: seat.runtime.id, provider: seat.provider, model: seat.model },
     });
     const result = await seat.runtime.run(request, {
@@ -549,7 +807,7 @@ export class ChatService {
         else this.steers.delete(conv.id);
         this.ctx.bus.publish({ type: 'chat.updated', conversationId: conv.id });
       },
-      ...(edit ? { onApproval: (a: ApprovalRequest) => this.requestApproval(conv.id, messageId, runId, a) } : {}),
+      ...(writes ? { onApproval: (a: ApprovalRequest) => this.requestApproval(conv.id, messageId, runId, a) } : {}),
     });
     this.steers.delete(conv.id);
     this.dropApprovals(conv.id);
@@ -566,6 +824,46 @@ export class ChatService {
       data: { runId, phase: 'end', status, numTurns: result.numTurns },
     });
     return result;
+  }
+
+  /**
+   * Your sessions outside Orbit, for this answer: null when they are off in Settings, for a
+   * security check, or when there are none. Brings the library up to date first (briefly).
+   */
+  private async pastContext(conv: ConversationRow, projects: RepoDTO[], signal: AbortSignal): Promise<PastContext | null> {
+    if (!this.past || conv.seat === 'security' || !this.ctx.settings.get().execution.pastSessions) return null;
+    try {
+      await this.past.ready();
+      if (signal.aborted) return null;
+      const folder = projects.length === 1 ? projects[0]!.localPath : null;
+      const recent = folder ? this.past.list({ cwd: folder, folderOnly: true, limit: 6 }) : [];
+      if (!recent.length && !this.past.list({ limit: 1 }).length) return null;
+      return {
+        dir: this.past.library,
+        system: pastSessionsSystem(this.past.library),
+        brief: pastSessionsBrief(recent.map((s) => ({ title: s.title, tool: s.source === 'claude' ? 'Claude Code' : 'Codex', when: (s.updatedAt ?? s.startedAt ?? '').slice(0, 10) || 'unknown date', file: s.file, ref: s.ref }))),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /** `@past:claude/1a2b3c4d` in your message: those sessions' transcripts go with it. */
+  private pastReferences(conversationId: string, messageId: string, message: string): string {
+    if (!this.past) return '';
+    const blocks: string[] = [];
+    for (const ref of pastRefs(message)) {
+      const hit = this.past.resolve(ref);
+      if (!hit) {
+        this.event(conversationId, messageId, { kind: 'note', actor: 'system', title: `Could not find the session @past:${ref}. It may have been deleted, or it is one of Orbit's own runs.`, data: null });
+        continue;
+      }
+      const s = hit.session;
+      const tool = s.source === 'claude' ? 'Claude Code' : 'Codex';
+      this.event(conversationId, messageId, { kind: 'note', actor: 'system', title: `Gave the agent your ${tool} session "${truncate(s.title, 80)}"`, data: { pastSession: s.ref } });
+      blocks.push(pastSessionBlock({ title: s.title, tool, cwd: s.cwd, when: (s.updatedAt ?? s.startedAt ?? '').slice(0, 10) || 'unknown date', ref: s.ref, file: hit.file, transcript: hit.transcript }));
+    }
+    return blocks.join('');
   }
 
   /**
@@ -619,9 +917,14 @@ export class ChatService {
       const answer = msgs[at];
       if (!answer?.content.trim()) return;
       const request = [...msgs.slice(0, at)].reverse().find((m) => m.role === 'user')?.content ?? '';
-      const cwd = this.projectsFor(this.row(conversationId).repoIds)[0]?.localPath;
-      const plan = await planSeat(this.ctx, 'prompter');
-      const seat = [plan.primary, plan.fallback].find((s) => s?.availability.available && s.runtime.kind === 'ai');
+      const conv = this.row(conversationId);
+      const cwd = this.projectsFor(conv.repoIds)[0]?.localPath;
+      // An OpenRouter or Hugging Face session stays on it: its own model guesses, never Claude or
+      // Codex. A sleeping endpoint is not woken just for a suggestion.
+      const gw = this.gatewayFor(conv.provider);
+      const viaOpenRouter = gw ? await gw.seat(conv.model, { wake: false }) : null;
+      const plan = viaOpenRouter ? null : await planSeat(this.ctx, 'prompter');
+      const seat = viaOpenRouter ? viaOpenRouter.candidate : [plan?.primary, plan?.fallback].find((s) => s?.availability.available && s.runtime.kind === 'ai');
       if (!seat || !cwd) return;
       const result = await seat.runtime.run(
         {
@@ -635,10 +938,12 @@ export class ChatService {
           timeoutMs: 60_000,
           maxBudgetUsd: null,
           // The smallest, fastest model is plenty for one line.
-          model: seat.provider === 'claude' ? 'haiku' : seat.model,
-          effort: 'low',
+          model: viaOpenRouter ? viaOpenRouter.gateway.model : seat.provider === 'claude' ? 'haiku' : seat.model,
+          effort: viaOpenRouter ? null : 'low',
           outputSchema: null,
           execution: { mode: 'trusted-local', allowNetworkTools: false },
+          // One line of text needs no tools.
+          ...(viaOpenRouter ? { gateway: { ...viaOpenRouter.gateway, tools: false } } : {}),
         },
         { signal: AbortSignal.timeout(75_000), onEvent: () => undefined },
       );
@@ -683,7 +988,7 @@ export class ChatService {
   }
 
   private blockedFrom(result: AgentRunResult, conv: ConversationRow): BlockedCommand[] {
-    if (conv.mode !== 'edit') return [];
+    if (conv.mode !== 'edit' || conv.permissionMode === 'plan') return [];
     const seen = new Set<string>();
     const out: BlockedCommand[] = [];
     for (const d of result.deniedTools) {
@@ -716,7 +1021,7 @@ export class ChatService {
     });
   }
 
-  private finish(messageId: string, patch: { status: ChatMessageDTO['status']; content?: string; error?: string; suggestion?: MissionSuggestion | null; blocked?: BlockedCommand[]; durationMs?: number }): void {
+  private finish(messageId: string, patch: { status: ChatMessageDTO['status']; content?: string; error?: string; suggestion?: MissionSuggestion | null; blocked?: BlockedCommand[]; durationMs?: number; usage?: MessageUsage }): void {
     this.ctx.db
       .update(conversationMessages)
       .set({
@@ -725,6 +1030,7 @@ export class ChatService {
         error: patch.error ?? null,
         suggestion: patch.suggestion ?? null,
         blocked: patch.blocked?.length ? patch.blocked : null,
+        usage: patch.usage ?? null,
         durationMs: patch.durationMs ?? null,
         finishedAt: nowIso(this.ctx),
       })
@@ -779,7 +1085,8 @@ export class ChatService {
 
   private summary(row: ConversationRow, msgs: ConversationMessageRow[]): ConversationSummaryDTO {
     const last = [...msgs].reverse().find((m) => m.content);
-    const lastAgent = [...msgs].reverse().find((m) => m.role === 'assistant');
+    // A command you ran yourself with `!` is not the agent's answer, even when it failed.
+    const lastAgent = [...msgs].reverse().find((m) => m.role === 'assistant' && m.runtime !== 'shell');
     const running = this.running.has(row.id) || msgs.some((m) => m.status === 'running');
     return {
       id: row.id,
@@ -803,6 +1110,18 @@ export class ChatService {
     };
   }
 }
+
+/**
+ * Claude Code's own system prompt tells the model it is Claude Code, made by Anthropic. An
+ * OpenRouter model is not: it should know, and say so when asked.
+ */
+function identityNote(name: string, slug: string, servedBy: string): string {
+  const shown = name.replace(/^[^:]+:\s*/, '');
+  return `Who you are: you are ${shown} (${slug}), a model ${servedBy}. You work inside Orbit, which uses Claude Code's tools as your workbench, but you are not Claude, not Claude Code and not made by Anthropic, whatever earlier parts of this prompt say. If you are asked who or what you are, say that you are ${shown}.`;
+}
+
+/** For an OpenRouter model that cannot use tools: it should say so instead of pretending to look. */
+const TOOLLESS_NOTE = `In this session you have no tools: you cannot read files, run commands or change anything. Answer from the conversation and what the developer pastes. When you would need to see a file or run something, say exactly what the developer should paste or run, or suggest switching to a model that can use tools.`;
 
 const IMAGE_EXT: Record<ChatImageType, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
 
@@ -846,8 +1165,9 @@ function withModel(seat: SeatCandidate, model: string | null, effort: EffortLeve
   if (seat.provider === 'scripted') return seat;
   const out = effort ? { ...seat, effort } : seat;
   if (!model) return out;
-  const forClaude = model.startsWith('claude-');
-  if ((seat.provider === 'claude') !== forClaude) return out;
+  // A model only goes to the AI it belongs to: never a Claude model to Codex, never an OpenRouter
+  // model to Claude (OpenRouter sessions pick theirs in `openRouterPlan`).
+  if (modelProvider(model) !== seat.provider) return out;
   return { ...out, model };
 }
 
@@ -856,7 +1176,21 @@ function titleFrom(message: string): string {
   return line.length > 70 ? `${line.slice(0, 67).trimEnd()}…` : line;
 }
 
-function toMessageDTO(m: ConversationMessageRow): ChatMessageDTO {
+/** What an answer used, for /cost and /context; undefined when the runtime reported nothing. */
+function usageOf(r: AgentRunResult): MessageUsage | undefined {
+  if (!r.usage && r.costUsd == null && !r.context) return undefined;
+  return {
+    costUsd: r.costUsd,
+    inputTokens: r.usage?.inputTokens ?? 0,
+    outputTokens: r.usage?.outputTokens ?? 0,
+    cacheReadTokens: r.usage?.cacheReadTokens ?? 0,
+    cacheWriteTokens: r.usage?.cacheWriteTokens ?? 0,
+    contextTokens: r.context?.tokens ?? null,
+    contextWindow: r.context?.window ?? null,
+  };
+}
+
+function toMessageDTO(m: ConversationMessageRow, compactFrom: string | null): ChatMessageDTO {
   return {
     id: m.id,
     conversationId: m.conversationId,
@@ -869,6 +1203,9 @@ function toMessageDTO(m: ConversationMessageRow): ChatMessageDTO {
     suggestion: m.suggestion ?? null,
     blocked: m.blocked ?? [],
     attachments: (m.attachments ?? []).map((a) => ({ id: a.id, name: a.name, mediaType: a.mediaType, size: a.size, url: `/api/chats/${m.conversationId}/attachments/${a.file}` })),
+    kind: m.runtime === 'shell' ? 'shell' : m.id === compactFrom ? 'summary' : m.kind,
+    usage: m.usage ?? null,
+    checkpoint: !!m.checkpoint,
     durationMs: m.durationMs,
     createdAt: m.createdAt,
     finishedAt: m.finishedAt,

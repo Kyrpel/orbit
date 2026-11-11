@@ -55,6 +55,47 @@ export async function repoChanges(ctx: OrbitContext, repo: RepoRow): Promise<Rep
   return { repoId: repo.id, isGit: true, branch, files, diff: redactSecrets(truncated ? diff.slice(0, MAX_DIFF_CHARS) : diff), truncated };
 }
 
+const SKIPPED_DIRS = /(^|\/)(node_modules|\.git|\.venv|__pycache__|\.pytest_cache|\.mypy_cache|\.turbo)(\/|$)/;
+
+/**
+ * Files and folders to complete an `@mention` in the prompt: the project's own files (tracked or new,
+ * not ignored), best matches first. With no query, the top of the tree. Plain folders without git have none.
+ */
+export async function repoFiles(ctx: OrbitContext, repo: RepoRow, query: string, limit = 30): Promise<string[]> {
+  if (!repo.isGit) return [];
+  const out = await ctx.git.run(repo.localPath, ['ls-files', '-co', '--exclude-standard', '-z']);
+  const files = [...new Set(out.split('\0').filter((f) => f && !SKIPPED_DIRS.test(f)))];
+  const dirs = new Set<string>();
+  for (const f of files) {
+    for (let i = f.indexOf('/'); i !== -1; i = f.indexOf('/', i + 1)) dirs.add(f.slice(0, i + 1));
+  }
+  const q = query.trim().replace(/\\/g, '/').toLowerCase().slice(0, 200);
+  const rank = (p: string): number => {
+    const isDir = p.endsWith('/');
+    const lower = p.toLowerCase();
+    const base = lower.slice(lower.lastIndexOf('/', isDir ? lower.length - 2 : lower.length) + 1);
+    if (!q) return p.split('/').length - (isDir ? 1 : 0);
+    if (lower.startsWith(q)) return 0;
+    if (base.startsWith(q)) return 1;
+    if (base.includes(q)) return 2;
+    if (lower.includes(q)) return 3;
+    // Letters in order, like a fuzzy file picker: "chkt" finds "checkout".
+    let at = 0;
+    for (const ch of q) {
+      at = lower.indexOf(ch, at);
+      if (at === -1) return -1;
+      at++;
+    }
+    return 4;
+  };
+  return [...files, ...dirs]
+    .map((p) => ({ p, r: rank(p) }))
+    .filter((x) => x.r >= 0)
+    .sort((a, b) => a.r - b.r || a.p.length - b.p.length || a.p.localeCompare(b.p))
+    .slice(0, Math.min(Math.max(limit, 1), 100))
+    .map((x) => x.p);
+}
+
 /** Commits every change in the project (dependency folders excluded) with the developer's message. */
 export async function commitRepoChanges(ctx: OrbitContext, repo: RepoRow, message: string): Promise<{ sha: string; files: number }> {
   if (!repo.isGit) throw new OrbitError('PRECONDITION', `${repo.name} is not a git repository.`);

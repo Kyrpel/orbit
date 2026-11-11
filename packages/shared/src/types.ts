@@ -512,8 +512,119 @@ export interface ProviderStatusDTO {
   models: { id: string; label: string }[];
 }
 
+/** A model on OpenRouter, run inside Claude Code (see `OPENROUTER_PREFIX`). */
+export interface OpenRouterModelDTO {
+  /** `openrouter:<slug>`: what a session's model setting holds. */
+  id: string;
+  /** OpenRouter's own id, like `deepseek/deepseek-v4.1-flash-1017`. */
+  slug: string;
+  /** OpenRouter's name for it, or the slug when OpenRouter's list could not be read. */
+  name: string;
+  /** It can use tools (read files, edit, run commands). Without, it can only talk. Null: unknown. */
+  tools: boolean | null;
+  contextLength: number | null;
+  /** US dollars per million tokens. */
+  pricePerMillion: { input: number; output: number } | null;
+  /** OpenRouter no longer lists it. */
+  missing: boolean;
+  /** Your master prompt for this model: added to its system prompt in every session. Empty: none. */
+  instructions: string;
+}
+
+export interface OpenRouterStatusDTO {
+  connected: boolean;
+  /** The key's last four characters, for recognising it. */
+  keyHint: string | null;
+  /** What OpenRouter says about the key (its label, credit used and limit), when it could ask. */
+  account: { label: string | null; usageUsd: number | null; limitUsd: number | null } | null;
+  models: OpenRouterModelDTO[];
+}
+
+/** One GPU option from Hugging Face Inference Endpoints, with its hourly price. */
+export interface HfHardwareDTO {
+  /** HF's compute id, like `aws-us-east-1-nvidia-l40s-x1`. */
+  id: string;
+  vendor: string;
+  region: string;
+  regionLabel: string;
+  instanceType: string;
+  instanceSize: string;
+  /** "Nvidia L40S x 1". */
+  label: string;
+  /** All GPU memory together, in GB. */
+  gpuMemoryGb: number;
+  pricePerHour: number;
+  /** HF says it can be rented now (not `not_available` or deprecated). */
+  available: boolean;
+}
+
+/** One GGUF file of a model: a size/quality trade-off ("quantization"). */
+export interface HfModelFileDTO {
+  path: string;
+  sizeGb: number;
+  /** Q4_K_M, IQ3_M, Q8_0… */
+  quant: string;
+  /** GPU memory it needs with a 64k-token context, in GB. */
+  needsGb: number;
+}
+
+/** What Orbit found for a Hugging Face model link: its files, and the GPUs that can run each. */
+export interface HfModelPlanDTO {
+  repository: string;
+  /** The model's chat template supports tools, so it can read and change files in your projects. */
+  tools: boolean;
+  license: string | null;
+  /** Needs accepting terms on the model page first. */
+  gated: boolean;
+  files: HfModelFileDTO[];
+  hardware: HfHardwareDTO[];
+  suggested: { file: string; hardwareId: string | null } | null;
+  /** A name for the endpoint (lowercase, at most 32 characters). */
+  name: string;
+}
+
+export type HfEndpointState = 'pending' | 'initializing' | 'updating' | 'updateFailed' | 'running' | 'paused' | 'failed' | 'scaledToZero';
+
+/** A Hugging Face Inference Endpoint you can use as a session's AI. */
+export interface HfEndpointDTO {
+  /** `hf:<name>`: what a session's model setting holds. */
+  id: string;
+  name: string;
+  repository: string;
+  /** The GGUF file it serves (llama.cpp endpoints). */
+  file: string | null;
+  state: HfEndpointState;
+  message: string | null;
+  url: string | null;
+  hardware: { label: string; gpuMemoryGb: number | null; pricePerHour: number | null; region: string };
+  /** Minutes without use before it sleeps (and stops costing); null: never. */
+  sleepAfterMinutes: number | null;
+  /** Orbit can run sessions on it (a llama.cpp endpoint that serves text). */
+  usable: boolean;
+  /** Made by Orbit. */
+  createdByOrbit: boolean;
+  /** Your master prompt for it (see OpenRouter's). */
+  instructions: string;
+  lastUsedAt: string | null;
+}
+
+export interface HuggingFaceStatusDTO {
+  connected: boolean;
+  /** Your Hugging Face user name (endpoints are created there). */
+  account: string | null;
+  /** The token can create and manage endpoints, not only call them. */
+  canManage: boolean;
+  endpoints: HfEndpointDTO[];
+  /** Why the endpoint list could not be read, if it could not. */
+  error: string | null;
+}
+
 export interface TeamDTO {
   providers: ProviderStatusDTO[];
+  /** Models on OpenRouter that Claude sessions can use instead of Claude's own. */
+  openrouter: OpenRouterStatusDTO;
+  /** Your own models on rented GPUs (Hugging Face Inference Endpoints). */
+  huggingface: HuggingFaceStatusDTO;
   fallback: boolean;
   worktrees: {
     root: string;
@@ -580,6 +691,15 @@ export interface ChatMessageDTO {
   blocked: BlockedCommand[];
   /** Images you attached to this message (pasted or dropped), shown as `[Image #1]` in its text. */
   attachments: ChatAttachmentDTO[];
+  /**
+   * `shell`: the output of a command you ran with `!` (not the agent). `summary`: the agent's own
+   * summary after /compact, which replaces the earlier conversation in its context.
+   */
+  kind: ChatMessageKind;
+  /** What this answer used (tokens, cost, context size); null for your messages and shell output. */
+  usage: ChatUsageDTO | null;
+  /** The project's files were saved just before this message was handled, so /rewind can restore them. */
+  checkpoint: boolean;
   durationMs: number | null;
   createdAt: string;
   finishedAt: string | null;
@@ -676,7 +796,27 @@ export interface BlockedCommand {
  * `ask`: read-only questions, possibly across several projects.
  */
 export type SessionMode = 'edit' | 'ask';
-export type SessionPermissionMode = 'ask' | 'auto';
+/**
+ * `ask`: ask before commands. `auto`: run them on their own, risky ones blocked. `plan`: like
+ * Claude Code's plan mode: the agent only reads and proposes a plan, and changes nothing until you
+ * approve it (Shift+Tab cycles the modes).
+ */
+export type SessionPermissionMode = 'ask' | 'auto' | 'plan';
+
+/** What one answer used, for /cost and /context. Money is only known for Claude; Codex reports tokens. */
+export interface ChatUsageDTO {
+  costUsd: number | null;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /** The size of the agent's context after this answer, and its model's window (null when unknown). */
+  contextTokens: number | null;
+  contextWindow: number | null;
+}
+
+/** What a message in a session is: an ordinary one, a command you ran yourself with `!`, or a /compact summary. */
+export type ChatMessageKind = 'chat' | 'plan' | 'shell' | 'summary';
 
 /** What the Assistant did while answering: same shape as mission events, so the live view can render it. */
 export interface ChatEventDTO {
@@ -691,6 +831,10 @@ export interface ChatEventDTO {
   data: unknown;
 }
 
+/** Which AI a session uses. OpenRouter runs its models (DeepSeek, Hermes…) inside Claude Code, with your OpenRouter key. */
+export type SessionProvider = 'auto' | 'claude' | 'codex' | 'openrouter' | 'huggingface';
+export const SESSION_PROVIDERS = ['auto', 'claude', 'codex', 'openrouter', 'huggingface'] as const;
+
 export interface ConversationSummaryDTO {
   id: string;
   title: string;
@@ -700,7 +844,7 @@ export interface ConversationSummaryDTO {
   /** The agent in this session: the session agent, or the security reviewer for a security check. */
   seat: 'assistant' | 'security';
   /** Which AI this session asks for; `auto` follows the AI team settings. */
-  provider: 'auto' | 'claude' | 'codex';
+  provider: SessionProvider;
   /** The runtime that holds the live agent session (resumed on the next message). */
   agentRuntime: string | null;
   /** Commands you allowed in this session. */
@@ -734,6 +878,33 @@ export interface ConversationDetailDTO extends ConversationSummaryDTO {
   approval: SessionApprovalDTO | null;
   /** Your likely next message, suggested after the last answer (Tab puts it in the prompt). */
   nextPrompt: string | null;
+}
+
+/** A Claude Code or Codex session you had outside Orbit (in a terminal, the desktop app or an editor). */
+export interface PastSessionDTO {
+  /** `claude/<first 8 characters of the id>`: what `@past:` in a message points at. */
+  ref: string;
+  source: 'claude' | 'codex';
+  id: string;
+  title: string;
+  /** Your first request in it, shortened. */
+  firstMessage: string | null;
+  /** The folder it ran in. */
+  cwd: string | null;
+  /** The connected project for that folder, if any. */
+  repoId: string | null;
+  /** Your messages and the agent's answers. */
+  messages: number;
+  startedAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface PastSessionsDTO {
+  /** Off in Settings: agents do not read your other sessions, and none are listed. */
+  enabled: boolean;
+  sessions: PastSessionDTO[];
+  /** Still reading them for the first time (lists may be incomplete). */
+  indexing: boolean;
 }
 
 /** Codex asking, mid-answer, to run something its sandbox blocks (a push, a commit, a download). */

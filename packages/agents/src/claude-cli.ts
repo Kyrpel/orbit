@@ -1,14 +1,18 @@
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { execa } from 'execa';
 import { redactSecrets } from '@orbit/shared';
 import { emitAssistantContent, emitToolResults, permissionDenials, type ToolCallLog } from './claude-stream';
 import { buildAgentEnv } from './env';
+import { startLlamaGateway } from './llamacpp-gateway';
 import { ENGINEER_TOOLS, READ_ONLY_TOOLS } from './policy';
 import {
   emptyResult,
   extractJson,
   commandRules,
+  gatewayEnv,
   imageNote,
   isUsageLimitError,
   type AgentImage,
@@ -37,6 +41,15 @@ export function userContent(text: string, images?: AgentImage[]): string | Recor
   return [...blocks, { type: 'text', text }];
 }
 
+/** The model's context window from a result's per-model usage: the running model's, else the largest. */
+export function contextWindowOf(modelUsage: Record<string, { contextWindow?: number }> | undefined, model: string | null): number | null {
+  if (!modelUsage) return null;
+  const own = model ? modelUsage[model]?.contextWindow : undefined;
+  if (own) return own;
+  const all = Object.values(modelUsage).map((u) => u.contextWindow ?? 0);
+  return all.length && Math.max(...all) > 0 ? Math.max(...all) : null;
+}
+
 /** Shell commands Claude Code refuses everywhere (Orbit's own policy checks them too). */
 const DENY_ALWAYS = [
   'git push --force*',
@@ -58,6 +71,9 @@ const DENY_ALWAYS = [
   'ssh *',
   'scp *',
 ];
+/** System prompt additions longer than this go to Claude Code in a file instead of on the command line. */
+const SYSTEM_INLINE_MAX = 6000;
+
 /** Autopilot only: there Orbit commits and pushes itself, after your approval. */
 const DENY_MISSIONS = ['git push *', 'git push', 'git remote *', 'git commit *'];
 const DENY_READS = ['Read(**/.env)', 'Read(**/.env.local)', 'Read(**/*.pem)', 'Read(**/id_rsa*)'];
@@ -109,10 +125,24 @@ export class ClaudeCodeCliRuntime implements AgentRuntime {
     return { available: true, reason: null, sandbox: process.platform === 'darwin' ? 'available' : 'unknown', details };
   }
 
-  /** `live`: keep the input open (stream-json) so messages can be added while the agent works. */
-  buildArgs(req: AgentRunRequest, live = false): string[] {
-    const tools: string[] = req.access === 'workspace-write' ? [...ENGINEER_TOOLS] : [...READ_ONLY_TOOLS];
-    if (req.execution.allowNetworkTools) tools.push('WebFetch', 'WebSearch');
+  /**
+   * `live`: keep the input open (stream-json) so messages can be added while the agent works.
+   * `systemFile`: the system prompt addition is in this file (long ones, see `run`).
+   */
+  buildArgs(req: AgentRunRequest, live = false, systemFile: string | null = null): string[] {
+    // A gateway model that cannot use tools gets none (the gateway would refuse the request).
+    const toolless = !!req.gateway && !req.gateway.tools;
+    const tools: string[] = toolless ? [] : req.access === 'workspace-write' ? [...ENGINEER_TOOLS] : [...READ_ONLY_TOOLS];
+    if (req.execution.allowNetworkTools && !toolless) tools.push('WebFetch', 'WebSearch');
+    // Working sessions may hand parts of a job to subagents (Claude Code's Agent tool). Subagents
+    // work under the same tool list and permission rules as the session itself.
+    if (req.userEnvironment && !toolless) tools.push('Agent', 'Skill');
+    // Working sessions that edit also get your own MCP servers (user settings, plugins and
+    // claude.ai connectors, as in your terminal). A project's own .mcp.json never loads
+    // (checked: `--setting-sources user` ignores it). Read-only sessions stay without MCP, so
+    // "never changes anything" holds. MCP tools follow your permission rules: Ask first only runs
+    // those you already allowed in Claude Code, Auto-accept lets the safety classifier decide.
+    const ownMcp = !!req.userEnvironment && req.access === 'workspace-write';
     // Working sessions never pre-approve the shell tools as a whole. "Ask first" (dontAsk):
     // only commands the developer allowed run, plus those Claude Code knows are read-only;
     // everything else is refused and reported. "Auto": Claude Code's auto mode decides, with
@@ -134,24 +164,24 @@ export class ClaudeCodeCliRuntime implements AgentRuntime {
       ...(req.userEnvironment ? ['--setting-sources', 'user'] : ['--restricted']),
       '--tools',
       tools.join(','),
-      '--allowedTools',
       // One argv element per rule: rules may contain spaces and quotes.
-      ...allowed,
+      ...(allowed.length ? ['--allowedTools', ...allowed] : []),
       '--disallowedTools',
       denyRules(!!req.allowGit && req.access === 'workspace-write').join(','),
       '--permission-mode',
       permissionMode,
       '--max-turns',
       String(req.maxTurns),
-      '--append-system-prompt',
-      req.systemAppend,
-      '--strict-mcp-config',
+      ...(systemFile ? ['--append-system-prompt-file', systemFile] : ['--append-system-prompt', req.systemAppend]),
+      ...(ownMcp ? [] : ['--strict-mcp-config']),
     ];
     if (!req.session?.persist) args.push('--no-session-persistence');
     if (req.session?.resumeId) args.push('--resume', req.session.resumeId);
     if (req.maxBudgetUsd != null) args.push('--max-budget-usd', String(req.maxBudgetUsd));
-    if (req.model) args.push('--model', req.model);
-    if (req.effort) args.push('--effort', req.effort);
+    if (req.gateway) args.push('--model', req.gateway.model);
+    else if (req.model) args.push('--model', req.model);
+    // Effort sets Claude's own thinking budget, which other models behind a gateway do not take.
+    if (req.effort && !req.gateway) args.push('--effort', req.effort);
     if (req.outputSchema) args.push('--json-schema', JSON.stringify(req.outputSchema));
     if (req.readRoots.length) args.push('--add-dir', ...req.readRoots);
     const settings: Record<string, unknown> = {};
@@ -159,6 +189,16 @@ export class ClaudeCodeCliRuntime implements AgentRuntime {
     if (rules.length) settings.permissions = { allow: rules };
     if (Object.keys(settings).length) args.push('--settings', JSON.stringify(settings));
     return args;
+  }
+
+  /**
+   * The CLI's environment. With a gateway, Claude Code authenticates with the gateway's key
+   * (`ANTHROPIC_AUTH_TOKEN` comes before a claude.ai login) and any other Anthropic or cloud
+   * credentials are left out, so the run cannot fall back to your Claude plan or API key.
+   */
+  envFor(req: AgentRunRequest): Record<string, string> {
+    if (!req.gateway) return buildAgentEnv(this.env);
+    return buildAgentEnv(this.env, gatewayEnv(req.gateway), false);
   }
 
   async run(req: AgentRunRequest, ctx: AgentRunContext): Promise<AgentRunResult> {
@@ -179,12 +219,25 @@ export class ClaudeCodeCliRuntime implements AgentRuntime {
     let closeInput: () => void = () => undefined;
     const calls: ToolCallLog = new Map();
     let model: string | null = req.model;
+    // The size of the agent's last request (not a subagent's): what its context holds now.
+    let lastCallTokens: number | null = null;
+    let systemDir: string | null = null;
+    let systemFile: string | null = null;
+    let adapter: Awaited<ReturnType<typeof startLlamaGateway>> | null = null;
 
     try {
+      if (req.gateway?.compatibility === 'llamacpp') adapter = await startLlamaGateway(req.gateway, controller.signal);
       const live = !!ctx.onSteerReady;
-      const sub = execa(this.bin, this.buildArgs(req, live), {
+      // A long system prompt (your own instructions for a model can be long) goes in a file:
+      // Windows refuses command lines over about 32,000 characters.
+      if (req.systemAppend.length > SYSTEM_INLINE_MAX) {
+        systemDir = mkdtempSync(path.join(os.tmpdir(), 'orbit-prompt-'));
+        systemFile = path.join(systemDir, 'system.md');
+        writeFileSync(systemFile, req.systemAppend, { mode: 0o600 });
+      }
+      const sub = execa(this.bin, this.buildArgs(req, live, systemFile), {
         cwd: req.cwd,
-        env: buildAgentEnv(this.env),
+        env: this.envFor(adapter ? { ...req, gateway: adapter.gateway } : req),
         extendEnv: false,
         ...(live ? { stdin: 'pipe' as const } : { input: `${req.prompt}${imageNote(req.images)}` }),
         reject: false,
@@ -232,6 +285,10 @@ export class ClaudeCodeCliRuntime implements AgentRuntime {
             if (typeof msg.model === 'string') model = msg.model;
             ctx.onEvent({ type: 'status', message: `Session started${model ? ` (${model})` : ''}` });
           } else if (type === 'assistant') {
+            const callUsage = (msg.message as { usage?: Record<string, number> } | undefined)?.usage;
+            if (callUsage && !msg.parent_tool_use_id) {
+              lastCallTokens = (callUsage.input_tokens ?? 0) + (callUsage.cache_read_input_tokens ?? 0) + (callUsage.cache_creation_input_tokens ?? 0) + (callUsage.output_tokens ?? 0);
+            }
             const last = emitAssistantContent((msg.message as { content?: unknown } | undefined)?.content, ctx.onEvent, calls);
             if (last) text = last;
           } else if (type === 'user') {
@@ -255,6 +312,8 @@ export class ClaudeCodeCliRuntime implements AgentRuntime {
       closeInput();
       clearTimeout(timer);
       ctx.signal.removeEventListener('abort', onAbort);
+      await adapter?.close();
+      if (systemDir) rmSync(systemDir, { recursive: true, force: true });
     }
 
     if (!resultMsg) {
@@ -278,6 +337,7 @@ export class ClaudeCodeCliRuntime implements AgentRuntime {
       errors?: string[];
       terminal_reason?: string;
       permission_denials?: unknown;
+      modelUsage?: Record<string, { contextWindow?: number }>;
     };
     if (typeof r.result === 'string' && r.result) text = r.result;
     const subtype = String(r.subtype ?? '');
@@ -297,7 +357,8 @@ export class ClaudeCodeCliRuntime implements AgentRuntime {
       status,
       text: redactSecrets(text),
       structured: r.structured_output ?? (req.outputSchema ? extractJson(text) : null),
-      costUsd: typeof r.total_cost_usd === 'number' ? r.total_cost_usd : null,
+      // Claude Code prices runs at Claude's rates; for a gateway model that number means nothing.
+      costUsd: typeof r.total_cost_usd === 'number' && !req.gateway ? r.total_cost_usd : null,
       usage: r.usage
         ? {
             inputTokens: r.usage.input_tokens ?? 0,
@@ -310,6 +371,7 @@ export class ClaudeCodeCliRuntime implements AgentRuntime {
       durationMs: Date.now() - started,
       sessionId: r.session_id ?? null,
       model,
+      context: lastCallTokens == null ? null : { tokens: lastCallTokens, window: contextWindowOf(r.modelUsage, model) },
       error: status === 'succeeded' ? null : redactSecrets([...(r.errors ?? []), r.terminal_reason ?? '', subtype].filter(Boolean).join('; ')),
       deniedTools: permissionDenials(r.permission_denials),
     };

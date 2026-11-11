@@ -44,6 +44,11 @@ const ExecutionSettings = z.object({
   sessionCommands: z.enum(['ask', 'auto']).default('ask'),
   /** After each answer, suggest your likely next message (a small, cheap model call), like Claude Code. */
   suggestNext: z.boolean().default(true),
+  /**
+   * Session agents may read your Claude Code and Codex sessions from outside Orbit (as
+   * condensed transcripts Orbit keeps in its data folder), and you can point at one with @past.
+   */
+  pastSessions: z.boolean().default(true),
 });
 
 const ModelSettings = z.object({
@@ -129,6 +134,73 @@ const GitHubSettings = z.object({
   includeSourceInPublicRepos: z.boolean().default(false),
 });
 
+/** An OpenRouter model id, like `deepseek/deepseek-v4.1-flash-1017` (`~` and `:` variants included). */
+export const OPENROUTER_SLUG = /^~?[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._:-]*$/i;
+
+/** A session model `openrouter:<slug>` runs in Claude Code, through OpenRouter. */
+export const OPENROUTER_PREFIX = 'openrouter:';
+
+export const isOpenRouterModel = (model: string | null | undefined): model is string => !!model && model.startsWith(OPENROUTER_PREFIX);
+
+export const openRouterSlug = (model: string) => model.slice(OPENROUTER_PREFIX.length);
+
+/** A session model `hf:<endpoint name>` runs in Claude Code, on your Hugging Face endpoint. */
+export const HF_PREFIX = 'hf:';
+
+export const isHfModel = (model: string | null | undefined): model is string => !!model && model.startsWith(HF_PREFIX);
+
+/** Which AI a model belongs to: Claude's own, OpenRouter's (`openrouter:…`), a Hugging Face endpoint (`hf:…`), or Codex's (anything else). */
+export function modelProvider(model: string): 'claude' | 'codex' | 'openrouter' | 'huggingface' {
+  return model.startsWith(OPENROUTER_PREFIX) ? 'openrouter' : model.startsWith(HF_PREFIX) ? 'huggingface' : model.startsWith('claude-') ? 'claude' : 'codex';
+}
+
+/**
+ * The model repository in a Hugging Face link: `https://huggingface.co/<owner>/<repo>`, the
+ * endpoint page `https://endpoints.huggingface.co/new/<owner>/<repo>`, or just `<owner>/<repo>`.
+ */
+export function parseHfRepository(input: string): string | null {
+  let s = input.trim();
+  const url = /^https?:\/\/(?:www\.)?(?:huggingface\.co|hf\.co|endpoints\.huggingface\.co\/new)\/([^?#]+)/i.exec(s);
+  if (url) s = decodeURIComponent(url[1]!).replace(/\/+$/, '');
+  const m = /^([A-Za-z0-9][\w.-]*)\/([A-Za-z0-9][\w.-]*)(?:\/(?:tree|blob|resolve)\/.*)?$/.exec(s);
+  if (!m) return null;
+  if (['models', 'datasets', 'spaces', 'docs', 'settings', 'organizations'].includes(m[1]!.toLowerCase())) return null;
+  return `${m[1]}/${m[2]}`;
+}
+
+/**
+ * The model id in what you pasted: `deepseek/deepseek-v4.1-flash-1017`, `openrouter:…`, or a
+ * link like `https://openrouter.ai/nousresearch/hermes-4-405b`. Null when it is neither.
+ */
+export function parseOpenRouterModel(input: string): string | null {
+  let s = input.trim();
+  if (s.startsWith(OPENROUTER_PREFIX)) s = s.slice(OPENROUTER_PREFIX.length);
+  const url = /^https?:\/\/(?:www\.)?openrouter\.ai\/(?:models\/)?([^?#]+)/i.exec(s);
+  if (url) s = decodeURIComponent(url[1]!).replace(/\/+$/, '').replace(/\/(api|providers|activity|apps|uptime)$/i, '');
+  return OPENROUTER_SLUG.test(s) ? s.toLowerCase() : null;
+}
+
+/** The models OpenRouter offers at first, before you change the list. */
+export const DEFAULT_OPENROUTER_MODELS = ['deepseek/deepseek-v4.1-flash-1017', 'nousresearch/hermes-4-405b'];
+
+/**
+ * OpenRouter: other models (DeepSeek, Hermes, GPT, Gemini…) inside Claude Code sessions. The
+ * API key lives in Orbit's secrets file, never here.
+ */
+/** Longest master prompt for one OpenRouter model or Hugging Face endpoint. */
+export const MAX_MODEL_INSTRUCTIONS = 40_000;
+
+/** Your Hugging Face endpoints: only your instructions per endpoint live here (the token is a secret). */
+const HuggingFaceSettings = z.object({
+  instructions: z.record(z.string(), z.string().max(MAX_MODEL_INSTRUCTIONS)).default({}),
+});
+
+const OpenRouterSettings = z.object({
+  models: z.array(z.string().trim().regex(OPENROUTER_SLUG)).max(30).default(DEFAULT_OPENROUTER_MODELS),
+  /** Your own instructions per model (by its id), added to its system prompt in every session. */
+  instructions: z.record(z.string(), z.string().max(MAX_MODEL_INSTRUCTIONS)).default({}),
+});
+
 const OnboardingSettings = z.object({
   completedAt: z.string().nullable().default(null),
 });
@@ -142,6 +214,8 @@ export const SettingsSchema = z.object({
   approvals: ApprovalSettings.prefault({}),
   asana: AsanaSettings.prefault({}),
   github: GitHubSettings.prefault({}),
+  openrouter: OpenRouterSettings.prefault({}),
+  huggingface: HuggingFaceSettings.prefault({}),
   onboarding: OnboardingSettings.prefault({}),
 });
 
@@ -162,6 +236,8 @@ export const SettingsPatchSchema = z
     approvals: section,
     asana: section,
     github: section,
+    openrouter: section,
+    huggingface: section,
     onboarding: section,
   })
   .strict();
@@ -186,6 +262,8 @@ export function mergeSettings(current: Settings, patch: SettingsPatch): Settings
     approvals: { ...current.approvals, ...defined(patch.approvals) },
     asana: { ...current.asana, ...defined(patch.asana) },
     github: { ...current.github, ...defined(patch.github) },
+    openrouter: { ...current.openrouter, ...defined(patch.openrouter) },
+    huggingface: { ...current.huggingface, ...defined(patch.huggingface) },
     onboarding: { ...current.onboarding, ...defined(patch.onboarding) },
   });
 }

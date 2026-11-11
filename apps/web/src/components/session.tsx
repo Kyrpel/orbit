@@ -2,15 +2,17 @@ import { AlertTriangle, ArrowUp, Check, ChevronDown, Clock3, Copy, History, Load
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { useNavigate } from 'react-router';
 import type { ChatEventDTO, ChatImageInput, ChatMessageDTO, ConversationDetailDTO, ConversationSummaryDTO, RepoDTO, SessionApprovalDTO, SessionMode, SessionPermissionMode } from '@orbit/shared';
-import { EFFORT_INFO, EFFORT_LEVELS, formatDuration, type EffortLevel } from '@orbit/shared';
+import { EFFORT_INFO, EFFORT_LEVELS, formatDuration, modelProvider, type EffortLevel } from '@orbit/shared';
 import { buildLiveModel, type LiveRun, type LiveStep } from '../lib/live-steps';
 import { del, keys, patch, post, useAction, useAgents, useChat, useChats, useSettings, useTeam } from '../lib/api';
 import { tabs, type WorkspaceTab } from '../lib/tabs';
+import { planAwaitingApproval } from '../lib/usage';
 import { cn, timeAgo } from '../lib/utils';
 import { ChangesPanel } from './changes-panel';
 import { KIND_ICON, Plan, since, useTick } from './live-steps';
 import { Markdown } from './markdown';
-import { modePatch, promptMode, SHORTCUTS, useMenuKeys, usePrompt, useRepoActions, type MenuKind, type PromptMenu, type PromptMode, type PromptOptions } from './prompt';
+import { PastText } from './past-chip';
+import { huggingFaceReady, modelChoices, modePatch, openRouterReady, promptMode, type SessionAi, SHORTCUTS, takeDraft, useMenuKeys, usePrompt, useRepoActions, type MenuKind, type PromptMenu, type PromptMode, type PromptOptions } from './prompt';
 import { NewMissionDialog } from './new-mission';
 import { modelLabel, PROVIDER_NAME, PROVIDER_TEXT, providerOfRuntime } from './provider';
 import { Button, ErrorNote, Loading } from './ui';
@@ -23,10 +25,15 @@ type Provider = ConversationSummaryDTO['provider'];
 
 /** Which AI works in this tab. */
 export function ProviderSwitch({ value, onChange, disabled }: { value: Provider; onChange: (p: Provider) => void; disabled?: boolean }) {
+  const team = useTeam();
   const options: { value: Provider; label: string }[] = [
     { value: 'auto', label: 'Auto' },
     { value: 'claude', label: 'Claude' },
     { value: 'codex', label: 'Codex' },
+    // OpenRouter shows once you connected it on the Agents page.
+    ...(openRouterReady(team.data) || value === 'openrouter' ? [{ value: 'openrouter' as const, label: 'OpenRouter' }] : []),
+    // Hugging Face shows once you have an endpoint (Agents page).
+    ...(huggingFaceReady(team.data) || value === 'huggingface' ? [{ value: 'huggingface' as const, label: 'Hugging Face' }] : []),
   ];
   return (
     <div className="inline-flex items-center gap-1.5">
@@ -93,6 +100,7 @@ export function CommandsSwitch({ value, onChange, provider }: { value: SessionPe
       label: 'Auto-accept',
       hint: "Commands run on their own, like Claude Code's auto mode. A safety check still blocks risky ones, and agents can never push, commit or read secret files.",
     },
+    { value: 'plan', label: 'Plan', hint: 'The agent only reads and proposes a plan. Nothing changes until you approve it.' },
   ];
   return (
     <div className="inline-flex items-center gap-1.5" title={codex ? 'Codex always runs commands inside its own sandbox (no network, no git writes), whichever you pick.' : undefined}>
@@ -124,10 +132,10 @@ export function ModelPicker({ provider, value, onChange }: { provider: Provider;
   const team = useTeam();
   const agents = useAgents();
   const seat = agents.data?.find((a) => a.role === 'assistant');
-  const ai = provider === 'auto' ? (seat?.resolved.provider === 'codex' ? 'codex' : 'claude') : provider;
-  const list = team.data?.providers.find((p) => p.provider === ai)?.models ?? [];
-  const fallback = ai === 'codex' ? seat?.codexModel : seat?.model;
-  const fits = (m: string | null | undefined) => !!m && (ai === 'claude') === m.startsWith('claude-');
+  const ai: SessionAi = provider === 'auto' ? (seat?.resolved.provider === 'codex' ? 'codex' : 'claude') : provider;
+  const list = modelChoices(team.data, ai);
+  const fallback = ai === 'openrouter' || ai === 'huggingface' ? list[0]?.id : ai === 'codex' ? seat?.codexModel : seat?.model;
+  const fits = (m: string | null | undefined) => !!m && modelProvider(m) === ai;
   const current = fits(value) ? value! : '';
   const name = (m: string | null | undefined) => (m ? (list.find((x) => x.id === m)?.label ?? modelLabel(m) ?? m).replace(/^Claude /, '') : null);
   return (
@@ -140,7 +148,7 @@ export function ModelPicker({ provider, value, onChange }: { provider: Provider;
         title="Applies to this session only. Change the default on the Agents page (Session agent)."
         className="h-8 max-w-[180px] rounded-[8px] border border-seam bg-hull px-2 text-xs text-chalk"
       >
-        <option value="">Default ({name(fallback) ?? (ai === 'codex' ? 'Codex setting' : 'agent setting')})</option>
+        <option value="">Default ({name(fallback) ?? (ai === 'codex' ? 'Codex setting' : ai === 'openrouter' ? 'add a model on the Agents page' : ai === 'huggingface' ? 'create an endpoint on the Agents page' : 'agent setting')})</option>
         {list.map((m) => (
           <option key={m.id} value={m.id}>
             {m.label.replace(/^Claude /, '')}
@@ -177,9 +185,9 @@ export function EffortPicker({ value, onChange }: { value: EffortLevel | null; o
   );
 }
 
-function aiName(runtime: string | null | undefined, seat?: ConversationSummaryDTO['seat']): { name: string; text: string } {
+function aiName(runtime: string | null | undefined, seat?: ConversationSummaryDTO['seat'], model?: string | null): { name: string; text: string } {
   if (seat === 'security') return { name: 'Security reviewer', text: 'text-chalk' };
-  const p = providerOfRuntime(runtime);
+  const p = providerOfRuntime(runtime, model);
   return { name: p ? (PROVIDER_NAME[p] ?? 'Agent') : 'Agent', text: p ? (PROVIDER_TEXT[p] ?? 'text-chalk') : 'text-chalk' };
 }
 
@@ -244,6 +252,25 @@ export function Composer({ prompt, placeholder, steerable, big, autoFocus = true
   return (
     <div className="space-y-2">
       {menu ? <LightMenu menu={menu} autoFocus={autoFocus} /> : null}
+      {!menu && p.files.length ? (
+        <div className="rounded-[14px] border border-seam bg-hull p-1.5 shadow-[0_12px_32px_-18px_rgb(16_24_40/0.35)]" role="listbox" aria-label="Files">
+          {p.files.map((path, i) => (
+            <button
+              key={path}
+              type="button"
+              role="option"
+              aria-selected={i === p.fileIndex}
+              onMouseEnter={() => p.setFileSel(i)}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => p.pickFile(path)}
+              className={cn('mono flex w-full rounded-[8px] px-2.5 py-1.5 text-left text-sm text-chalk', i === p.fileIndex && 'bg-hull-2')}
+            >
+              <span className="truncate">@{path}</span>
+            </button>
+          ))}
+          <p className="px-2.5 pb-0.5 pt-1 text-2xs text-dust-2">↑↓ to choose · Enter or Tab to insert · Esc to close</p>
+        </div>
+      ) : null}
       {!menu && p.suggestions.length ? (
         <div className="rounded-[14px] border border-seam bg-hull p-1.5 shadow-[0_12px_32px_-18px_rgb(16_24_40/0.35)]" role="listbox" aria-label="Commands">
           {p.suggestions.slice(p.windowStart, p.windowStart + 8).map((c, n) => {
@@ -286,6 +313,8 @@ export function Composer({ prompt, placeholder, steerable, big, autoFocus = true
         </div>
       ) : null}
       {p.notice ? <p className="px-1 text-xs text-signal-deep">{p.notice}</p> : null}
+      {p.info ? <p className="whitespace-pre-line px-1 text-xs text-dust">{p.info.join('\n')}</p> : null}
+      {p.shellMode ? <p className="px-1 text-xs text-dust">Runs this command in the project right now. The agent hears about it with your next message.</p> : null}
       <div
         {...p.dropProps}
         className={cn(
@@ -449,11 +478,11 @@ function Thumbs({ attachments, small }: { attachments: ChatMessageDTO['attachmen
 function FoldedText({ text }: { text: string }) {
   const [open, setOpen] = useState(false);
   const lines = text.split('\n');
-  if (open || (lines.length <= 12 && text.length <= 1500)) return <>{text}</>;
+  if (open || (lines.length <= 12 && text.length <= 1500)) return <PastText text={text} look="light" />;
   const head = lines.slice(0, 8).join('\n').slice(0, 1200);
   return (
     <>
-      {head}
+      <PastText text={head} look="light" />
       {'\n'}
       <button type="button" onClick={() => setOpen(true)} className="text-xs font-[600] text-telemetry hover:underline">
         … show all {lines.length} lines
@@ -504,7 +533,7 @@ function AgentTurn({ msg, events, seat, isLast, allowed, onAllow, onAllowAll, on
   const hidden = cut ? lines.slice(0, cut).filter((l) => !keep(l)).length : 0;
   const plan = [...runs].reverse().find((r) => r.plan?.length)?.plan ?? null;
   const notes = model.blocks.filter((b) => b.type === 'milestone');
-  const who = aiName(msg.runtime, seat);
+  const who = aiName(msg.runtime, seat, msg.model);
   const blocked = isLast && !running ? msg.blocked.filter((b) => !dismissed.includes(b.command) && !allowed.includes(b.command)) : [];
 
   return (
@@ -706,6 +735,14 @@ function Transcript({
                 <span className="text-2xs text-dust">{m.error}</span>
               ) : null}
             </div>
+          ) : m.kind === 'shell' ? (
+            <ShellResult key={m.id} msg={m} />
+          ) : m.kind === 'summary' && m.status === 'done' ? (
+            <div key={m.id} className="rounded-[14px] border border-seam bg-hull-2 px-4 py-3">
+              <p className="text-sm font-[650] text-chalk">Conversation compacted</p>
+              <p className="mt-0.5 text-xs text-dust">The agent continues from this summary instead of the whole conversation.</p>
+              <div className="mt-2 max-h-52 overflow-y-auto whitespace-pre-wrap text-[13px] leading-5 text-chalk/90">{m.content}</div>
+            </div>
           ) : (
             <AgentTurn
               key={m.id}
@@ -833,7 +870,8 @@ function Header({
       {children}
       {!security ? <ProviderSwitch value={provider} onChange={onProvider} /> : null}
       {!security && onModel ? <ModelPicker provider={provider} value={model ?? null} onChange={onModel} /> : null}
-      {!security && onEffort ? <EffortPicker value={effort ?? null} onChange={onEffort} /> : null}
+      {/* Effort is Claude's and Codex's own thinking setting; OpenRouter models do not take it. */}
+      {!security && onEffort && provider !== 'openrouter' && provider !== 'huggingface' ? <EffortPicker value={effort ?? null} onChange={onEffort} /> : null}
     </>
   );
   if (compact) {
@@ -903,7 +941,7 @@ function NewSession({ repo, tab, compact, onExpand }: { repo: RepoDTO; tab: Work
   const canEdit = repo.allowModify && repo.isGit;
   const agents = useAgents();
   const settings = useSettings();
-  const [draft, setDraft] = useState('');
+  const [draft, setDraft] = useState(() => takeDraft(tab.key));
   const [provider, setProvider] = useState<Provider>('auto');
   const [model, setModel] = useState<string | null>(null);
   const [effort, setEffort] = useState<EffortLevel | null>(null);
@@ -916,6 +954,7 @@ function NewSession({ repo, tab, compact, onExpand }: { repo: RepoDTO; tab: Work
     { invalidate: [keys.chats] },
   );
   const actions = useRepoActions(repo, tab);
+  const shell = useAction((command: string) => post<ConversationDetailDTO>(`/api/repos/${repo.id}/shell`, { command }), { invalidate: [keys.chats] });
   const [menu, setMenu] = useState<MenuKind | null>(null);
   const seat = agents.data?.find((a) => a.role === 'assistant');
   const autoName = seat?.resolved.provider ? PROVIDER_NAME[seat.resolved.provider] : 'the AI';
@@ -956,12 +995,24 @@ function NewSession({ repo, tab, compact, onExpand }: { repo: RepoDTO; tab: Work
         },
       ),
     commands: {
-      clear: () => setDraft(''),
+      clear: (d?: string) => setDraft(d ?? ''),
       open: actions.open,
       ...(canEdit ? { commit: (m: string) => actions.commit(m, () => undefined), security: actions.security } : {}),
       close: () => tabs.close(tab.key),
       ...(onExpand ? { expand: onExpand } : {}),
     },
+    ...(canEdit
+      ? {
+          onShell: (command: string, done: () => void) =>
+            shell.mutate(command, {
+              onSuccess: (c) => {
+                done();
+                tabs.attach(tab.key, c.id);
+                navigate(`/s/${c.id}`);
+              },
+            }),
+        }
+      : {}),
     history: [],
     menu,
     setMenu,
@@ -1018,7 +1069,14 @@ function RunningSession({ repo, tab, sessionId, compact, onExpand }: { repo: Rep
   const [draft, setDraft] = useState('');
   const [showChanges, setShowChanges] = useState(false);
   const invalidate = [keys.chats, keys.chat(sessionId)];
-  const send = useAction((v: { message: string; now?: boolean; images?: ChatImageInput[] }) => post<ConversationDetailDTO>(`/api/chats/${sessionId}/messages`, v), { invalidate });
+  const send = useAction((v: { message: string; now?: boolean; images?: ChatImageInput[]; permissionMode?: SessionPermissionMode }) => post<ConversationDetailDTO>(`/api/chats/${sessionId}/messages`, v), { invalidate });
+  const compactChat = useAction((focus: string) => post<ConversationDetailDTO>(`/api/chats/${sessionId}/compact`, { focus }), { invalidate });
+  const rewindChat = useAction((v: { messageId: string; code: boolean; conversation: boolean }) => post<{ chat: ConversationDetailDTO; message: string }>(`/api/chats/${sessionId}/rewind`, v), {
+    success: 'Rewound to before that message',
+    invalidate: [...invalidate, keys.changes(repo.id)],
+  });
+  const shell = useAction((command: string) => post<ConversationDetailDTO>(`/api/repos/${repo.id}/shell`, { command, chatId: sessionId }), { invalidate });
+  const [planSeen, setPlanSeen] = useState<string | null>(null);
   const unqueue = useAction((messageId: string) => del<ConversationDetailDTO>(`/api/chats/${sessionId}/messages/${messageId}`), { invalidate });
   const stop = useAction(() => post(`/api/chats/${sessionId}/cancel`), { invalidate });
   // A model belongs to one AI, so switching AI goes back to that AI's default model.
@@ -1029,7 +1087,10 @@ function RunningSession({ repo, tab, sessionId, compact, onExpand }: { repo: Rep
   const allowAll = useAction(() => post<ConversationDetailDTO>(`/api/chats/${sessionId}/allow-all`), { invalidate });
   const approve = useAction((decision: 'accept' | 'acceptForSession' | 'decline') => post<ConversationDetailDTO>(`/api/chats/${sessionId}/approval`, { decision }), { invalidate });
   const setCommands = useAction((permissionMode: SessionPermissionMode) => patch(`/api/chats/${sessionId}`, { permissionMode }), {
-    success: (r) => ((r as ConversationSummaryDTO).permissionMode === 'auto' ? 'Auto-accept on: commands run on their own, risky ones are still blocked' : 'Ask first: the agent asks before running commands'),
+    success: (r) => {
+      const mode = (r as ConversationSummaryDTO).permissionMode;
+      return mode === 'auto' ? 'Auto-accept on: commands run on their own, risky ones are still blocked' : mode === 'plan' ? 'Plan mode: the agent only reads and proposes a plan' : 'Ask first: the agent asks before running commands';
+    },
     invalidate,
   });
   const remove = useAction(() => del(`/api/chats/${sessionId}`), { success: 'Session deleted', invalidate: [keys.chats] });
@@ -1069,7 +1130,24 @@ function RunningSession({ repo, tab, sessionId, compact, onExpand }: { repo: Rep
     commands: {
       clear: actions.clear,
       open: actions.open,
-      ...(editing ? { changes: () => setShowChanges(true), commit: (m: string) => actions.commit(m, () => setShowChanges(true)), security: actions.security } : {}),
+      ...(editing
+        ? {
+            changes: () => setShowChanges(true),
+            commit: (m: string) => actions.commit(m, () => setShowChanges(true)),
+            security: actions.security,
+            rewind: (messageId: string, what: { code: boolean; conversation: boolean }) =>
+              rewindChat.mutate(
+                { messageId, ...what },
+                {
+                  onSuccess: (r) => {
+                    // Your message goes back in the prompt, to change and send again.
+                    if (what.conversation) setDraft(r.message);
+                  },
+                },
+              ),
+          }
+        : {}),
+      compact: (focus: string) => compactChat.mutate(focus),
       close: () => {
         tabs.close(tab.key);
         navigate('/');
@@ -1087,7 +1165,11 @@ function RunningSession({ repo, tab, sessionId, compact, onExpand }: { repo: Rep
     menu,
     setMenu,
     suggestion: c.nextPrompt,
+    messages: c.messages,
+    ...(canEdit ? { onShell: (command: string, done: () => void) => shell.mutate(command, { onSuccess: done }) } : {}),
   };
+  // Plan mode: once the agent has proposed its plan, you decide how it goes on.
+  const plan = !running && canEdit && c.seat !== 'security' ? planAwaitingApproval(promptMode(c.mode, c.permissionMode), c.messages) : null;
   const changesButton = editing ? (
     <Button size="sm" variant="ghost" className={cn(!compact && 'xl:hidden', showChanges && 'bg-hull-2')} onClick={() => setShowChanges(!showChanges)} aria-expanded={showChanges}>
       Changes
@@ -1158,6 +1240,9 @@ function RunningSession({ repo, tab, sessionId, compact, onExpand }: { repo: Rep
           compact={compact}
         />
         {c.approval ? <ApprovalCard approval={c.approval} who={who ?? 'the agent'} busy={approve.isPending} onAnswer={(d) => approve.mutate(d)} /> : null}
+        {plan && planSeen !== plan.id && !c.approval ? (
+          <PlanCard busy={send.isPending} onApprove={(permissionMode) => send.mutate({ message: 'The plan is approved. Go ahead and implement it now.', permissionMode })} onKeepPlanning={() => setPlanSeen(plan.id)} />
+        ) : null}
         <div className={cn('border-t border-seam bg-hull', compact ? 'px-3 py-2.5' : 'px-5 py-3 sm:px-8')}>
           <div className="mx-auto max-w-[760px]">
             <Composer
@@ -1178,6 +1263,41 @@ function RunningSession({ repo, tab, sessionId, compact, onExpand }: { repo: Rep
         </div>
       </section>
       {editing ? <ChangesPanel repo={repo} running={running} editEvents={editEvents} open={showChanges} onClose={() => setShowChanges(false)} docked={!compact} /> : null}
+    </div>
+  );
+}
+
+/** What a command you ran with `!` printed. */
+function ShellResult({ msg }: { msg: ChatMessageDTO }) {
+  if (msg.status === 'running') return <p className="mono text-xs text-dust">Running…</p>;
+  const failed = msg.status !== 'done';
+  return (
+    <pre className={cn('mono max-h-72 overflow-auto whitespace-pre-wrap rounded-[10px] border px-3 py-2 text-[13px] leading-5 text-chalk', failed ? 'border-signal/50 bg-signal/[0.08]' : 'border-seam bg-hull-2')}>
+      {msg.content}
+      {msg.error ? `\n${msg.error}` : ''}
+    </pre>
+  );
+}
+
+/** Plan mode: the agent has proposed its plan and waits for you to say how it goes on. */
+function PlanCard({ busy, onApprove, onKeepPlanning }: { busy: boolean; onApprove: (mode: SessionPermissionMode) => void; onKeepPlanning: () => void }) {
+  return (
+    <div className="border-t border-telemetry/40 bg-telemetry/[0.06] px-5 py-3 sm:px-8" role="alert">
+      <div className="mx-auto max-w-[760px]">
+        <p className="text-sm font-[650] text-chalk">Ready to code?</p>
+        <p className="mt-0.5 text-xs text-dust">The plan is above. Nothing has been changed yet.</p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Button size="sm" variant="primary" loading={busy} onClick={() => onApprove('auto')} title="Commands run on their own; risky ones are still blocked">
+            Yes, auto-accept commands
+          </Button>
+          <Button size="sm" onClick={() => onApprove('ask')}>
+            Yes, ask before running commands
+          </Button>
+          <Button size="sm" variant="ghost" onClick={onKeepPlanning}>
+            Keep planning
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }

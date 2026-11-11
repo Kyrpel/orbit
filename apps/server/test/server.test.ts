@@ -106,6 +106,18 @@ describe('local API security', () => {
     expect(JSON.parse(res.body).error.code).toBe('VALIDATION');
   });
 
+  it('lists your sessions from outside Orbit, and nothing once they are turned off', async () => {
+    expect((await request(port, { path: '/api/past-sessions' })).status).toBe(401);
+    const on = await request(port, { path: '/api/past-sessions?q=badges&limit=5', headers: auth });
+    expect(on.status).toBe(200);
+    // Tests never see the real Claude Code and Codex folders (vitest.config.ts).
+    expect(JSON.parse(on.body)).toMatchObject({ enabled: true, sessions: [] });
+    orbit.ctx.settings.update({ execution: { pastSessions: false } });
+    const off = await request(port, { path: '/api/past-sessions', headers: auth });
+    expect(JSON.parse(off.body)).toEqual({ enabled: false, sessions: [], indexing: false });
+    orbit.ctx.settings.update({ execution: { pastSessions: true } });
+  });
+
   it('validates settings values', async () => {
     const res = await request(port, { method: 'PATCH', path: '/api/settings', headers: auth, body: { execution: { maxConcurrentMissions: 99 } } });
     expect(res.status).toBe(400);
@@ -126,5 +138,42 @@ describe('local API security', () => {
     expect(JSON.parse(bad.body).error.message).toMatch(/without a shell/);
     const ok = await request(port, { method: 'PATCH', path: `/api/repos/${id}`, headers: auth, body: { verifyCommands: [{ label: 'Tests', command: 'npm test' }] } });
     expect(ok.status).toBe(200);
+  });
+
+  it('runs a ! command only with the token, from our own origin, and only in a project Orbit may change', async () => {
+    const repoDir = path.join(root, 'shell-repo');
+    mkdirSync(repoDir);
+    execFileSync('git', ['init', '--initial-branch=main'], { cwd: repoDir, stdio: 'pipe' });
+    writeFileSync(path.join(repoDir, 'README.md'), '# r\n');
+    execFileSync('git', ['add', '-A'], { cwd: repoDir, stdio: 'pipe' });
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-m', 'init'], { cwd: repoDir, stdio: 'pipe' });
+    const id = JSON.parse((await request(port, { method: 'POST', path: '/api/repos', headers: auth, body: { path: repoDir } })).body).id as string;
+    const run = (headers: Record<string, string>) => request(port, { method: 'POST', path: `/api/repos/${id}/shell`, headers, body: { command: '!echo hello-from-orbit' } });
+
+    // Running a command is as sensitive as it gets: the same gates as every other write apply.
+    expect((await run({})).status).toBe(401);
+    expect((await run({ ...auth, origin: 'https://evil.example.com' })).status).toBe(403);
+    expect((await request(port, { method: 'POST', path: `/api/repos/${id}/shell`, headers: auth, body: { command: '   ' } })).status).toBe(400);
+
+    const started = await run(auth);
+    expect(started.status).toBe(200);
+    const chatId = (JSON.parse(started.body) as { id: string }).id;
+    let detail: { messages: { kind: string; status: string; content: string }[] } = { messages: [] };
+    for (let i = 0; i < 100; i++) {
+      detail = JSON.parse((await request(port, { path: `/api/chats/${chatId}`, headers: auth })).body);
+      if (detail.messages[1] && detail.messages[1].status !== 'running') break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(detail.messages[1]).toMatchObject({ kind: 'shell', status: 'done' });
+    expect(detail.messages[1]?.content).toContain('hello-from-orbit');
+
+    // @ mentions list the project's files; plan mode is a valid session mode, anything else is not.
+    expect(JSON.parse((await request(port, { path: `/api/repos/${id}/files?q=read`, headers: auth })).body)).toEqual(['README.md']);
+    expect((await request(port, { method: 'PATCH', path: `/api/chats/${chatId}`, headers: auth, body: { permissionMode: 'plan' } })).status).toBe(200);
+    expect((await request(port, { method: 'PATCH', path: `/api/chats/${chatId}`, headers: auth, body: { permissionMode: 'anything' } })).status).toBe(400);
+
+    // A project that is read-only in Orbit gets no commands from the prompt either.
+    await request(port, { method: 'PATCH', path: `/api/repos/${id}`, headers: auth, body: { allowModify: false } });
+    expect((await run(auth)).status).toBe(403);
   });
 });

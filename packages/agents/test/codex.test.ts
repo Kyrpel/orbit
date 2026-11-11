@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { CodexCliRuntime, isUsageLimitError, parseAssistantReply, translateCodexEvent, unwrapShellCommand, type AgentEvent, type AgentRunRequest } from '../src';
+import { CodexCliRuntime, codexWebArgs, isUsageLimitError, parseAssistantReply, translateCodexEvent, unwrapShellCommand, type AgentEvent, type AgentRunRequest } from '../src';
 
 const cwd = path.resolve('/work/wt');
 
@@ -57,6 +57,24 @@ describe('Codex event translation', () => {
     ]);
   });
 
+  it('shows Codex opening a page as Fetch and a search as Web Search, once each', () => {
+    const out: AgentEvent[] = [];
+    const seen = new Set<string>();
+    const on = (e: object) => translateCodexEvent(e, cwd, (x) => out.push(x), seen);
+    // The step starts before Codex says what it is doing: nothing to show yet.
+    on({ type: 'item.started', item: { id: 'w1', type: 'web_search', query: '' } });
+    on({ type: 'item.completed', item: { id: 'w1', type: 'web_search', query: 'codex approval never', action: { type: 'search', query: 'codex approval never', queries: null } } });
+    on({ type: 'item.completed', item: { id: 'w2', type: 'web_search', query: 'https://example.com/docs', action: { type: 'open_page', url: 'https://example.com/docs' } } });
+    // Known at the start: shown then, and not again when it completes.
+    on({ type: 'item.started', item: { id: 'w3', type: 'web_search', query: 'https://example.com/b', action: { type: 'open_page', url: 'https://example.com/b' } } });
+    on({ type: 'item.completed', item: { id: 'w3', type: 'web_search', query: 'https://example.com/b', action: { type: 'open_page', url: 'https://example.com/b' } } });
+    expect(out).toEqual([
+      { type: 'tool', tool: 'WebSearch', id: 'w1', summary: 'Search the web for "codex approval never"', step: 'web', target: 'codex approval never' },
+      { type: 'tool', tool: 'WebFetch', id: 'w2', summary: 'Fetch https://example.com/docs', step: 'web', target: 'https://example.com/docs' },
+      { type: 'tool', tool: 'WebFetch', id: 'w3', summary: 'Fetch https://example.com/b', step: 'web', target: 'https://example.com/b' },
+    ]);
+  });
+
   it('turns the to-do list into a plan with the first open item in progress', () => {
     const out = run([{ type: 'item.updated', item: { id: 't', type: 'todo_list', items: [{ text: 'Add param', completed: true }, { text: 'Tests', completed: false }, { text: 'Docs', completed: false }] } }]);
     expect(out[0]).toMatchObject({
@@ -89,6 +107,13 @@ describe('Codex arguments', () => {
     // Network is only ever opened for the writing sandbox, and only when allowed.
     expect(reviewer).not.toContain('sandbox_workspace_write.network_access=true');
     expect(reviewer).not.toContain('--output-schema');
+  });
+
+  it("makes Codex's own web tool follow the web switch", () => {
+    const rt = new CodexCliRuntime('codex', {}, 'linux');
+    expect(rt.buildArgs(req(), null)).toEqual(expect.arrayContaining(['-c', 'web_search="disabled"']));
+    expect(rt.buildArgs(req({ execution: { mode: 'trusted-local', allowNetworkTools: true } }), null)).toEqual(expect.arrayContaining(['-c', 'web_search="live"']));
+    expect(codexWebArgs(false)).toEqual(['-c', 'web_search="disabled"']);
   });
 
   it('puts role instructions and readable folders ahead of the task', () => {
@@ -155,6 +180,53 @@ describe('Claude Code arguments for working sessions', () => {
     // Orbit's hard limits apply in every mode.
     expect(auto[auto.indexOf('--disallowedTools') + 1]).toContain('Bash(git push *)');
   });
+
+  it('gives sessions subagents and your own MCP servers, and missions and read-only sessions neither', async () => {
+    const { ClaudeCodeCliRuntime } = await import('../src');
+    const rt = new ClaudeCodeCliRuntime('claude', {});
+    const tools = (a: string[]) => (a[a.indexOf('--tools') + 1] ?? '').split(',');
+    const edit = rt.buildArgs(req({ userEnvironment: true, commands: { mode: 'allowlist', allowed: [] } }));
+    expect(tools(edit)).toEqual(expect.arrayContaining(['Agent', 'Skill']));
+    // Your MCP servers load (no strict MCP config); a project's own .mcp.json never does under user settings.
+    expect(edit).not.toContain('--strict-mcp-config');
+
+    // Read-only sessions (Ask, plan mode) keep "never changes anything": no MCP servers.
+    const readOnly = rt.buildArgs(req({ userEnvironment: true, access: 'read-only' }));
+    expect(tools(readOnly)).toEqual(expect.arrayContaining(['Read', 'Glob', 'Grep', 'Agent', 'Skill']));
+    expect(tools(readOnly)).not.toContain('Edit');
+    expect(readOnly).toContain('--strict-mcp-config');
+
+    // Missions: no subagents, no MCP servers.
+    const mission = rt.buildArgs(req());
+    expect(tools(mission)).not.toContain('Agent');
+    expect(mission).toContain('--strict-mcp-config');
+  });
+
+  it("reads the context window from a result's per-model usage", async () => {
+    const { contextWindowOf } = await import('../src');
+    expect(contextWindowOf({ 'claude-haiku-5-5': { contextWindow: 1_000_000 } }, 'claude-haiku-5-5')).toBe(1_000_000);
+    expect(contextWindowOf({ a: { contextWindow: 200_000 }, b: { contextWindow: 1_000_000 } }, 'other')).toBe(1_000_000);
+    expect(contextWindowOf(undefined, null)).toBeNull();
+  });
+});
+
+describe('session prompts', () => {
+  it('carries a compacted summary ahead of the history, and shell output the developer ran', async () => {
+    const { sessionPrompt, shellContext, compactPrompt, SESSION_PLAN_SYSTEM } = await import('../src');
+    const project = { name: 'shop', path: '/p', languages: [], frameworks: [], topLevel: [] };
+    const p = sessionPrompt({ message: 'Next step', project, intro: true, summary: 'We added discounts.', history: [{ role: 'user', content: 'later question' }] });
+    expect(p.indexOf('We added discounts.')).toBeGreaterThan(-1);
+    expect(p.indexOf('We added discounts.')).toBeLessThan(p.indexOf('later question'));
+    expect(p.endsWith('Next step')).toBe(true);
+    expect(sessionPrompt({ message: 'Next step', project, intro: false, summary: 'x' })).toBe('Next step');
+
+    expect(shellContext([])).toBe('');
+    const ctx = shellContext([{ command: 'npm test', output: '1 failing', exitCode: 1 }]);
+    expect(ctx).toContain('$ npm test\n1 failing\n(exit code 1)');
+    expect(ctx).toContain('<untrusted_command_output>');
+    expect(compactPrompt('the API')).toContain('Focus especially on: the API');
+    expect(SESSION_PLAN_SYSTEM).toContain('read-only');
+  });
 });
 
 describe('command parts', () => {
@@ -195,6 +267,27 @@ describe('Codex app-server events', () => {
     ]);
   });
 
+  it('shows pages Codex opens as Fetch, with the address, and its searches as Web Search', async () => {
+    const { translateAppServerNotification } = await import('../src');
+    const out: AgentEvent[] = [];
+    const seen = new Set<string>();
+    const on = (m: string, p: object) => translateAppServerNotification(m, p as Record<string, unknown>, cwd, (e) => out.push(e), seen);
+    on('item/started', { item: { id: 'w1', type: 'webSearch', query: '', action: null } });
+    on('item/completed', { item: { id: 'w1', type: 'webSearch', query: 'vercel dns a record', action: { type: 'search', query: 'vercel dns a record', queries: ['vercel dns a record'] } } });
+    on('item/completed', { item: { id: 'w2', type: 'webSearch', query: 'https://learn.chatgpt.com/docs/agent-approvals-security', action: { type: 'openPage', url: 'https://learn.chatgpt.com/docs/agent-approvals-security' } } });
+    on('item/completed', { item: { id: 'w3', type: 'webSearch', query: 'approval', action: { type: 'findInPage', url: 'https://learn.chatgpt.com/docs/agent-approvals-security', pattern: 'approval' } } });
+    // An unspecified action whose query is only an address is still a page being opened.
+    on('item/completed', { item: { id: 'w4', type: 'webSearch', query: 'https://example.com/x', action: { type: 'other' } } });
+    // The same step reported twice is shown once.
+    on('item/completed', { item: { id: 'w2', type: 'webSearch', query: 'https://learn.chatgpt.com/docs/agent-approvals-security', action: { type: 'openPage', url: 'https://learn.chatgpt.com/docs/agent-approvals-security' } } });
+    expect(out).toEqual([
+      { type: 'tool', tool: 'WebSearch', id: 'w1', summary: 'Search the web for "vercel dns a record"', step: 'web', target: 'vercel dns a record' },
+      { type: 'tool', tool: 'WebFetch', id: 'w2', summary: 'Fetch https://learn.chatgpt.com/docs/agent-approvals-security', step: 'web', target: 'https://learn.chatgpt.com/docs/agent-approvals-security' },
+      { type: 'tool', tool: 'WebFetch', id: 'w3', summary: 'Fetch https://learn.chatgpt.com/docs/agent-approvals-security', step: 'web', target: 'https://learn.chatgpt.com/docs/agent-approvals-security' },
+      { type: 'tool', tool: 'WebFetch', id: 'w4', summary: 'Fetch https://example.com/x', step: 'web', target: 'https://example.com/x' },
+    ]);
+  });
+
   it('reports command output and file diffs for the terminal view', async () => {
     const { translateAppServerNotification } = await import('../src');
     const out: AgentEvent[] = [];
@@ -213,6 +306,17 @@ describe('Codex app-server events', () => {
     expect(out[0]).toEqual({ type: 'tool_result', isError: false, id: 'c2', summary: '', output: { text: 'l1\nl2\nl3\nl4', lines: 6 } });
     expect(out[1]).toMatchObject({ tool: 'Edit', output: { diff: [' const a = 1;', '-const b = 2;', '+const b = 3;'], added: 1, removed: 1 } });
     expect(out[2]).toMatchObject({ tool: 'Write', output: { diff: ['+one', '+two'], added: 2, removed: 0 } });
+  });
+
+  it("counts what one answer used from the thread's running total", async () => {
+    const { tokenDelta } = await import('../src');
+    // 1,000 input of which 800 cached, 50 output including 10 reasoning; the thread already held 400 input / 300 cached.
+    expect(tokenDelta({ inputTokens: 1400, cachedInputTokens: 1100, outputTokens: 70, reasoningOutputTokens: 10 }, { inputTokens: 400, cachedInputTokens: 300, outputTokens: 20, reasoningOutputTokens: 0 })).toEqual({
+      inputTokens: 200,
+      outputTokens: 50,
+      cacheReadTokens: 800,
+      cacheWriteTokens: 0,
+    });
   });
 });
 

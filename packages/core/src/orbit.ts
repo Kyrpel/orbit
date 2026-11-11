@@ -1,8 +1,9 @@
+import path from 'node:path';
 import { ClaudeAgentSdkRuntime, ClaudeCodeCliRuntime, CodexCliRuntime, ScriptedRuntime, type AgentRuntime } from '@orbit/agents';
-import { and, eq, inArray, agentRuns, missionRepos, missions, openDatabase, verifications, type DatabaseHandle } from '@orbit/database';
+import { and, eq, inArray, isNotNull, agentRuns, conversations, missionRepos, missions, openDatabase, verifications, type DatabaseHandle } from '@orbit/database';
 import { defaultRunner, Git, GhCliClient, type CommandRunner, type GitHubClient } from '@orbit/git';
 import { AsanaProvider } from '@orbit/integrations-asana';
-import { DEFAULT_PORT, OrbitError, type RuntimeId } from '@orbit/shared';
+import { DEFAULT_PORT, OrbitError, type PastSessionsDTO, type RuntimeId, type TeamDTO } from '@orbit/shared';
 import { consoleLogger, EventBus, type Logger } from './bus';
 import { ChatService } from './chat';
 import { PromptEngineer } from './prompter';
@@ -15,13 +16,16 @@ import { Notifier } from './notifier';
 import { Outbox } from './outbox';
 import { OverviewService } from './overview';
 import { ensureOrbitHome, orbitPaths, resolveOrbitHome } from './paths';
+import { HuggingFaceService } from './huggingface';
+import { OpenRouterService } from './openrouter';
+import { PastSessions, pastSessionsDirs } from './past-sessions';
 import { Pipeline } from './pipeline';
 import { JobQueue, Worker } from './queue';
 import { buildReceipt } from './receipts';
 import { RepoService } from './repos';
 import { FileSecretStore, type SecretStore } from './secrets';
-import { teamStatus } from './team';
-import { commitRepoChanges, repoChanges } from './workspace';
+import { teamStatus, worktreeRoot } from './team';
+import { commitRepoChanges, repoChanges, repoFiles } from './workspace';
 import { TriggerService } from './triggers';
 
 export interface CreateOrbitOptions {
@@ -64,6 +68,12 @@ export class Orbit {
   readonly chat: ChatService;
   readonly prompter: PromptEngineer;
   readonly skills: SkillsService;
+  /** Your Claude Code and Codex sessions from outside Orbit, for session agents to draw on. */
+  readonly past: PastSessions;
+  /** Other models (DeepSeek, Hermes…) through OpenRouter, inside Claude Code sessions. */
+  readonly openrouter: OpenRouterService;
+  /** Your own models on rented GPUs (Hugging Face Inference Endpoints). */
+  readonly huggingface: HuggingFaceService;
   readonly worker: Worker;
   private readonly handle: DatabaseHandle;
   private running = false;
@@ -119,8 +129,16 @@ export class Orbit {
     this.pipeline = new Pipeline(this.ctx, this.missions, this.repos, this.notifier, this.outbox, this.queue);
     this.triggers = new TriggerService(this.ctx, this.integrations, this.missions, this.notifier, this.outbox);
     this.overview = new OverviewService(this.ctx, this.missions, this.integrations);
-    this.chat = new ChatService(this.ctx, this.repos);
-    this.prompter = new PromptEngineer(this.ctx, this.integrations, this.repos);
+    this.past = new PastSessions(
+      pastSessionsDirs(env),
+      paths.pastSessions,
+      () => this.ownSessionIds(),
+      () => [worktreeRoot(this.ctx), paths.worktrees, paths.home],
+    );
+    this.openrouter = new OpenRouterService(this.ctx);
+    this.huggingface = new HuggingFaceService(this.ctx);
+    this.chat = new ChatService(this.ctx, this.repos, this.past, [this.openrouter, this.huggingface]);
+    this.prompter = new PromptEngineer(this.ctx, this.integrations, this.repos, [this.openrouter, this.huggingface]);
     this.skills = new SkillsService(this.ctx);
     this.worker = new Worker(
       this.queue,
@@ -185,6 +203,17 @@ export class Orbit {
     if (r.requeuedJobs || r.repairedMissions || r.unknownSideEffects) this.ctx.log.info('recovered after restart', r);
     this.worker.start();
     if (opts.triggers !== false) this.triggers.start();
+    // Read your other sessions in the background, so the first message does not wait for it.
+    if (this.ctx.settings.get().execution.pastSessions) void this.past.sync();
+  }
+
+  /** Session ids Orbit's own agents used (they run on the same CLIs): never shown as "your" sessions. */
+  private ownSessionIds(): Set<string> {
+    const db = this.ctx.db;
+    const ids = new Set<string>();
+    for (const r of db.select({ id: conversations.agentSessionId }).from(conversations).where(isNotNull(conversations.agentSessionId)).all()) if (r.id) ids.add(r.id);
+    for (const r of db.select({ id: agentRuns.sessionId }).from(agentRuns).where(isNotNull(agentRuns.sessionId)).all()) if (r.id) ids.add(r.id);
+    return ids;
   }
 
   async stop(): Promise<void> {
@@ -203,13 +232,37 @@ export class Orbit {
   }
 
   /** The AI team: which providers are connected and where worktrees live. */
-  team() {
-    return teamStatus(this.ctx);
+  async team(): Promise<TeamDTO> {
+    const [team, openrouter, huggingface] = await Promise.all([teamStatus(this.ctx), this.openrouter.status(), this.huggingface.status()]);
+    return { ...team, openrouter, huggingface };
   }
 
   /** Uncommitted changes in a project (the workspace's Changes panel). */
   changes(repoId: string) {
     return repoChanges(this.ctx, this.repos.getRow(repoId));
+  }
+
+  /** Files and folders matching what you typed after `@` in the prompt. */
+  files(repoId: string, query: string) {
+    return repoFiles(this.ctx, this.repos.getRow(repoId), query);
+  }
+
+  /**
+   * Your Claude Code and Codex sessions from outside Orbit, newest first: `repoId` puts that
+   * project's folder first, `q` also searches inside them. For `/past` and `/resume` in the prompt.
+   */
+  async pastSessions(opts: { q?: string; repoId?: string | null; limit?: number } = {}): Promise<PastSessionsDTO> {
+    if (!this.ctx.settings.get().execution.pastSessions) return { enabled: false, sessions: [], indexing: false };
+    await this.past.ready(1500);
+    const repos = this.repos.list();
+    const folder = opts.repoId ? (repos.find((r) => r.id === opts.repoId)?.localPath ?? null) : null;
+    const norm = (p: string) => {
+      const r = path.resolve(p).replace(/[\\/]+$/, '');
+      return this.ctx.platform === 'win32' ? r.toLowerCase() : r;
+    };
+    const byFolder = new Map(repos.map((r) => [norm(r.localPath), r.id]));
+    const sessions = this.past.list({ query: opts.q ?? '', cwd: folder, limit: Math.min(Math.max(opts.limit ?? 30, 1), 100) }).map(({ file: _file, ...s }) => ({ ...s, repoId: s.cwd ? (byFolder.get(norm(s.cwd)) ?? null) : null }));
+    return { enabled: true, sessions, indexing: this.past.indexing };
   }
 
   /** Commits a project's changes, unless an agent is still editing it. */

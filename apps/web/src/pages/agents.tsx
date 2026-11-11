@@ -2,6 +2,8 @@ import { AlertTriangle, ArrowRight, Check, ClipboardList, Hammer, MessageCircle,
 import { useState } from 'react';
 import { Link } from 'react-router';
 import { EFFORT_INFO, EFFORT_LEVELS, formatDuration, formatUsd, type AgentRoleDTO, type EffortLevel, type ProviderStatusDTO, type Settings, type TeamDTO, type TeamSeat } from '@orbit/shared';
+import { HuggingFaceCard } from '../components/hf-card';
+import { OpenRouterCard } from '../components/openrouter-card';
 import { PROVIDER_NAME, PROVIDER_TEXT, ProviderBadge } from '../components/provider';
 import { Button, Code, ErrorNote, Loading, PageHeader, Panel, PanelHeader, Switch, Tag } from '../components/ui';
 import { keys, patch, useAction, useAgents, useSettings, useTeam, type SettingsPatch } from '../lib/api';
@@ -110,6 +112,8 @@ function TeamPanel({ team, seats, securityOn }: { team: TeamDTO; seats: AgentRol
         {team.providers.map((p) => (
           <ProviderCard key={p.provider} p={p} />
         ))}
+        {team.openrouter ? <OpenRouterCard status={team.openrouter} /> : null}
+        {team.huggingface ? <HuggingFaceCard status={team.huggingface} /> : null}
       </div>
       <div className="flex items-start justify-between gap-6 border-t border-seam px-5 py-4">
         <div>

@@ -3,7 +3,7 @@ import { createInterface } from 'node:readline';
 import { execa } from 'execa';
 import { redactSecrets, type AgentPlanItem, type StepOutput } from '@orbit/shared';
 import { emptyResult, isUsageLimitError, type AgentEvent, type AgentImage, type AgentRunContext, type AgentRunRequest, type AgentRunResult, type AgentRunStatus } from './runtime';
-import { shellName, unwrapShellCommand } from './codex-cli';
+import { codexWebArgs, codexWebStep, shellName, unwrapShellCommand, type CodexWebAction } from './codex-cli';
 import { addedFile, outputPreview, unifiedDiff } from './output';
 
 /**
@@ -28,9 +28,38 @@ type Item = {
   aggregatedOutput?: string | null;
   changes?: { path: string; kind?: { type?: string } | string; diff?: string }[];
   query?: string;
+  action?: CodexWebAction | null;
   server?: string;
   tool?: string;
 };
+
+/** Codex's token counts for a request or for a whole thread. */
+type TokenBreakdown = { inputTokens?: number; cachedInputTokens?: number; cacheWriteInputTokens?: number; outputTokens?: number; reasoningOutputTokens?: number };
+
+function subtractTokens(total: TokenBreakdown, last: TokenBreakdown | undefined): TokenBreakdown {
+  const minus = (a?: number, b?: number) => Math.max(0, (a ?? 0) - (b ?? 0));
+  return {
+    inputTokens: minus(total.inputTokens, last?.inputTokens),
+    cachedInputTokens: minus(total.cachedInputTokens, last?.cachedInputTokens),
+    cacheWriteInputTokens: minus(total.cacheWriteInputTokens, last?.cacheWriteInputTokens),
+    outputTokens: minus(total.outputTokens, last?.outputTokens),
+    reasoningOutputTokens: minus(total.reasoningOutputTokens, last?.reasoningOutputTokens),
+  };
+}
+
+/** What one answer used: the thread's total now, minus what it had before the answer began. Exported for tests. */
+export function tokenDelta(now: TokenBreakdown, before: TokenBreakdown): NonNullable<AgentRunResult['usage']> {
+  const d = subtractTokens(now, before);
+  const cached = d.cachedInputTokens ?? 0;
+  return {
+    // Codex counts cached tokens inside the input; Orbit lists them apart, as Claude does.
+    inputTokens: Math.max(0, (d.inputTokens ?? 0) - cached),
+    // Reasoning is already included in outputTokens.
+    outputTokens: d.outputTokens ?? 0,
+    cacheReadTokens: cached,
+    cacheWriteTokens: d.cacheWriteInputTokens ?? 0,
+  };
+}
 
 function shortPath(p: string, cwd: string): string {
   const rel = path.relative(cwd, p);
@@ -51,9 +80,19 @@ function codexDiff(kind: string | undefined, diff: string): StepOutput | undefin
 }
 
 /** Maps app-server notifications onto Orbit's live steps. Exported for tests. */
-export function translateAppServerNotification(method: string, params: Json, cwd: string, onEvent: (e: AgentEvent) => void): void {
+export function translateAppServerNotification(method: string, params: Json, cwd: string, onEvent: (e: AgentEvent) => void, webSeen: Set<string> = new Set()): void {
   const item = (params.item ?? {}) as Item;
   const id = item.id;
+  // Codex's web tool: a search, or opening a page (shown as Fetch). Shown once, as soon as
+  // Codex has said what it is doing, which may only be when the step completes.
+  if (item.type === 'webSearch' && (method === 'item/started' || method === 'item/completed')) {
+    const step = codexWebStep(item);
+    if (step && !(id && webSeen.has(id))) {
+      if (id) webSeen.add(id);
+      onEvent(step);
+    }
+    return;
+  }
   if (method === 'item/started') {
     if (item.type === 'commandExecution' && item.command) {
       const cmd = redactSecrets(unwrapShellCommand(item.command));
@@ -65,8 +104,6 @@ export function translateAppServerNotification(method: string, params: Json, cwd
         const output = c.diff ? codexDiff(kind, c.diff) : undefined;
         onEvent({ type: 'tool', tool: verb === 'Write' ? 'Write' : 'Edit', id, summary: `${verb} ${path.basename(c.path)}`, step: 'edit', target: shortPath(c.path, cwd), ...(output ? { output } : {}) });
       }
-    } else if (item.type === 'webSearch') {
-      onEvent({ type: 'tool', tool: 'WebSearch', id, summary: `Search the web for ${JSON.stringify(item.query ?? '').slice(0, 80)}`, step: 'web', target: item.query ?? null });
     } else if (item.type === 'mcpToolCall') {
       onEvent({ type: 'tool', tool: item.tool ?? 'tool', id, summary: `${item.server ?? 'mcp'}: ${item.tool ?? 'tool'}`, step: 'other', target: null });
     }
@@ -100,6 +137,7 @@ export async function runCodexAppServer(opts: { bin: string; env: Record<string,
   const args = ['app-server'];
   if (opts.platform === 'win32') args.push('-c', 'windows.sandbox="unelevated"');
   if (req.access === 'workspace-write' && req.execution.allowNetworkTools) args.push('-c', 'sandbox_workspace_write.network_access=true');
+  args.push(...codexWebArgs(req.execution.allowNetworkTools));
 
   const controller = new AbortController();
   const sub = execa(opts.bin, args, {
@@ -159,6 +197,11 @@ export async function runCodexAppServer(opts: { bin: string; env: Record<string,
   let turnId: string | null = null;
   let turnOpen = false;
   let text = '';
+  const webSeen = new Set<string>();
+  let ctxTokens: number | null = null;
+  let ctxWindow: number | null = null;
+  let usageBase: TokenBreakdown | null = null;
+  let usageNow: TokenBreakdown | null = null;
   let turnStatus: string | null = null;
   let turnError: string | null = null;
   let finished!: () => void;
@@ -211,9 +254,21 @@ export async function runCodexAppServer(opts: { bin: string; env: Record<string,
     } else if (method === 'error') {
       const err = (params.error ?? params) as Json;
       if (err.message) turnError = String(err.message);
+    } else if (method === 'thread/tokenUsage/updated') {
+      const u = (params.tokenUsage ?? {}) as { last?: TokenBreakdown; total?: TokenBreakdown; modelContextWindow?: number | null };
+      if (u.last) {
+        // The last request's size is what the context holds now.
+        ctxTokens = (u.last.inputTokens ?? 0) + (u.last.outputTokens ?? 0);
+        ctxWindow = u.modelContextWindow ?? ctxWindow;
+      }
+      if (u.total) {
+        // `total` counts the whole thread: this answer's share is what grew since it began.
+        if (!usageBase) usageBase = subtractTokens(u.total, u.last);
+        usageNow = u.total;
+      }
     } else {
       if (method === 'item/completed' && ((params.item ?? {}) as Item).type === 'agentMessage') text = String(((params.item ?? {}) as Item).text ?? '') || text;
-      translateAppServerNotification(method, params, req.cwd, ctx.onEvent);
+      translateAppServerNotification(method, params, req.cwd, ctx.onEvent, webSeen);
     }
   });
   void sub.then(() => finished(), () => finished());
@@ -276,8 +331,10 @@ export async function runCodexAppServer(opts: { bin: string; env: Record<string,
     status,
     text: redactSecrets(text),
     structured: null,
+    // Codex reports tokens, not money: runs through a ChatGPT plan are not billed per token.
     costUsd: null,
-    usage: null,
+    usage: usageNow && usageBase ? tokenDelta(usageNow, usageBase) : null,
+    context: ctxTokens == null ? null : { tokens: ctxTokens, window: ctxWindow },
     numTurns: turnStatus ? 1 : null,
     durationMs: Date.now() - started,
     sessionId: threadId,

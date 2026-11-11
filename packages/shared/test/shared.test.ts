@@ -129,3 +129,23 @@ describe('slugify', () => {
     expect(slugify('???')).toBe('task');
   });
 });
+
+describe('OpenRouter model ids', () => {
+  it('reads a model from its id, its openrouter.ai link or a session model', async () => {
+    const { parseOpenRouterModel, modelProvider, isOpenRouterModel, SettingsSchema } = await import('../src');
+    expect(parseOpenRouterModel('https://openrouter.ai/deepseek/deepseek-v4.1-flash-1017')).toBe('deepseek/deepseek-v4.1-flash-1017');
+    expect(parseOpenRouterModel('https://openrouter.ai/nousresearch/hermes-4-405b/providers')).toBe('nousresearch/hermes-4-405b');
+    expect(parseOpenRouterModel('https://openrouter.ai/models/nousresearch/hermes-4-405b?tab=api')).toBe('nousresearch/hermes-4-405b');
+    expect(parseOpenRouterModel(' openrouter:google/gemini-2.5-pro ')).toBe('google/gemini-2.5-pro');
+    expect(parseOpenRouterModel('deepseek/deepseek-v4.1-flash:batch')).toBe('deepseek/deepseek-v4.1-flash:batch');
+    expect(parseOpenRouterModel('not a model')).toBeNull();
+    expect(parseOpenRouterModel('https://example.com/a/b')).toBeNull();
+    // Each model belongs to one AI: OpenRouter's are not Claude's.
+    expect(modelProvider('openrouter:nousresearch/hermes-4-405b')).toBe('openrouter');
+    expect(modelProvider('claude-opus-5-5')).toBe('claude');
+    expect(modelProvider('gpt-6')).toBe('codex');
+    expect(isOpenRouterModel('claude-opus-5-5')).toBe(false);
+    // The two models you asked for are there from the start.
+    expect(SettingsSchema.parse({}).openrouter.models).toEqual(['deepseek/deepseek-v4.1-flash-1017', 'nousresearch/hermes-4-405b']);
+  });
+});

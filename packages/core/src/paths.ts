@@ -13,6 +13,8 @@ export interface OrbitPaths {
   logs: string;
   /** Images attached to session messages. */
   uploads: string;
+  /** Condensed transcripts of your Claude Code and Codex sessions from outside Orbit, for session agents to read. */
+  pastSessions: string;
 }
 
 /** `ORBIT_HOME` or `~/.orbit`. Everything Orbit stores lives here, never inside your repositories. */
@@ -32,6 +34,7 @@ export function orbitPaths(home: string): OrbitPaths {
     repos: path.join(home, 'repos'),
     logs: path.join(home, 'logs'),
     uploads: path.join(home, 'uploads'),
+    pastSessions: path.join(home, 'past-sessions'),
   };
 }
 

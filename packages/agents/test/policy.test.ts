@@ -94,6 +94,53 @@ describe('Claude Code CLI runtime arguments', () => {
     expect(flag('--disallowedTools')).toContain('Bash(git push *)');
     expect(args).not.toContain('--settings');
   });
+
+  it('runs an OpenRouter model with its own key, and without tools when the model has none', async () => {
+    const { ClaudeCodeCliRuntime } = await import('../src');
+    // Your own Anthropic key and a cloud provider are in the environment: neither may be used.
+    const rt = new ClaudeCodeCliRuntime('claude', { PATH: '/bin', ANTHROPIC_API_KEY: 'sk-ant-yours', CLAUDE_CODE_USE_BEDROCK: '1', ANTHROPIC_BASE_URL: 'https://elsewhere' });
+    const base = {
+      role: 'assistant' as const,
+      prompt: 'x',
+      systemAppend: 'y',
+      cwd: root,
+      readRoots: [],
+      access: 'workspace-write' as const,
+      maxTurns: 10,
+      timeoutMs: 1000,
+      maxBudgetUsd: null,
+      model: 'openrouter:deepseek/deepseek-v4.1-flash-1017',
+      effort: 'xhigh' as const,
+      outputSchema: null,
+      execution: { mode: 'trusted-local' as const, allowNetworkTools: true },
+      userEnvironment: true,
+      commands: { mode: 'allowlist' as const, allowed: [] },
+    };
+    const gateway = { name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api', token: 'sk-or-v1-key', model: 'deepseek/deepseek-v4.1-flash-1017', tools: true };
+    const withTools = rt.buildArgs({ ...base, gateway });
+    const flag = (args: string[], name: string) => args[args.indexOf(name) + 1];
+    expect(flag(withTools, '--model')).toBe('deepseek/deepseek-v4.1-flash-1017');
+    expect(withTools).not.toContain('--effort');
+    expect(flag(withTools, '--tools')).toContain('Edit');
+
+    const env = rt.envFor({ ...base, gateway });
+    expect(env).toMatchObject({ ANTHROPIC_BASE_URL: 'https://openrouter.ai/api', ANTHROPIC_AUTH_TOKEN: 'sk-or-v1-key', ANTHROPIC_MODEL: 'deepseek/deepseek-v4.1-flash-1017', ANTHROPIC_DEFAULT_HAIKU_MODEL: 'deepseek/deepseek-v4.1-flash-1017', CLAUDE_CODE_SUBAGENT_MODEL: 'deepseek/deepseek-v4.1-flash-1017', MAX_THINKING_TOKENS: '0', PATH: '/bin' });
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(env.CLAUDE_CODE_USE_BEDROCK).toBeUndefined();
+    // Without a gateway, your own setup is untouched.
+    expect(rt.envFor(base)).toMatchObject({ ANTHROPIC_API_KEY: 'sk-ant-yours', ANTHROPIC_BASE_URL: 'https://elsewhere' });
+
+    const chatOnly = rt.buildArgs({ ...base, gateway: { ...gateway, model: 'nousresearch/hermes-4-405b', tools: false } });
+    expect(flag(chatOnly, '--tools')).toBe('');
+    expect(chatOnly).not.toContain('--allowedTools');
+    expect(flag(chatOnly, '--model')).toBe('nousresearch/hermes-4-405b');
+
+    // A long system prompt (a long master prompt for a model) goes in a file, not on the command line.
+    const viaFile = rt.buildArgs({ ...base, gateway }, false, '/tmp/orbit-prompt/system.md');
+    expect(flag(viaFile, '--append-system-prompt-file')).toBe('/tmp/orbit-prompt/system.md');
+    expect(viaFile).not.toContain('--append-system-prompt');
+    expect(flag(withTools, '--append-system-prompt')).toBe('y');
+  });
 });
 
 describe('extractJson', () => {

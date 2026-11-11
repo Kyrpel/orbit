@@ -12,17 +12,20 @@ import {
   type EffortLevel,
   type RepoDTO,
   type SessionApprovalDTO,
+  type SessionPermissionMode,
 } from '@orbit/shared';
 import { del, keys, patch, post, useAction, useChat, useSettings } from '../lib/api';
 import { buildLiveModel, type LiveRun, type LiveStep } from '../lib/live-steps';
 import { imageToken, splitImageTokens } from '../lib/paste';
 import { tabs, type WorkspaceTab } from '../lib/tabs';
+import { planAwaitingApproval } from '../lib/usage';
 import { cn } from '../lib/utils';
 import { ChangesPanel } from './changes-panel';
 import { since, useTick } from './live-steps';
 import { Markdown } from './markdown';
 import { NewMissionDialog } from './new-mission';
-import { modePatch, promptMode, SHORTCUTS, useMenuKeys, usePrompt, useRepoActions, type MenuKind, type PromptMenu, type PromptMode, type PromptOptions, type Provider } from './prompt';
+import { PastText } from './past-chip';
+import { modePatch, promptMode, SHORTCUTS, takeDraft, useMenuKeys, usePrompt, useRepoActions, type MenuKind, type PromptMenu, type PromptMode, type PromptOptions, type Provider } from './prompt';
 import { modelLabel, PROVIDER_NAME, providerOfRuntime } from './provider';
 import { STARTERS } from './session';
 /*
@@ -37,11 +40,14 @@ type PaneState = 'working' | 'needs' | 'done' | 'failed' | 'new';
 
 /** U+23FA with the text-style selector, so it never turns into a coloured emoji. */
 const DOT = '⏺\uFE0E';
+/** What you tell the agent when you approve its plan. */
+const APPROVE_PLAN = 'The plan is approved. Go ahead and implement it now.';
 const SPIN = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
 
 const MODE_LINE: Record<PromptMode, { text: string; tone: string }> = {
   'ask-first': { text: '? for shortcuts', tone: 't-dim' },
   auto: { text: '⏵⏵ auto-accept on (shift+tab to cycle)', tone: 't-auto' },
+  plan: { text: '⏸ plan mode on (shift+tab to cycle)', tone: 't-plan' },
   'read-only': { text: '⏸ read-only mode on (shift+tab to cycle)', tone: 't-plan' },
 };
 
@@ -236,7 +242,7 @@ function StepBlock({ step, folder }: { step: LiveStep; folder: string }) {
 }
 
 /** Your message: `>` and the text, with `[Image #1]` linking to the image you attached. */
-function UserLine({ text, attachments = [], dim, strike, children }: { text: string; attachments?: ChatAttachmentDTO[]; dim?: boolean; strike?: boolean; children?: ReactNode }) {
+function UserLine({ text, attachments = [], dim, strike, glyph = '>', children }: { text: string; attachments?: ChatAttachmentDTO[]; dim?: boolean; strike?: boolean; glyph?: string; children?: ReactNode }) {
   const parts = splitImageTokens(text);
   const mentioned = new Set(parts.filter((x): x is { n: number } => typeof x !== 'string').map((x) => x.n));
   const extra = attachments.map((_, i) => i + 1).filter((n) => !mentioned.has(n));
@@ -252,18 +258,66 @@ function UserLine({ text, attachments = [], dim, strike, children }: { text: str
   };
   return (
     <div className={cn('t-user -mx-[1ch] grid grid-cols-[2ch_minmax(0,1fr)] px-[1ch] py-[0.1em]', dim && 'opacity-75')}>
-      <span className="select-none t-dim" aria-label="You">
-        &gt;
+      <span className={cn('select-none', glyph === '!' ? 't-perm' : 't-dim')} aria-label={glyph === '!' ? 'You ran a command' : 'You'}>
+        {glyph}
       </span>
       <div className="min-w-0">
         <span className={cn('whitespace-pre-wrap break-words', strike ? 'line-through t-dim' : 't-fg')}>
-          {parts.map((x, i) => (typeof x === 'string' ? x : link(x.n, i)))}
+          {parts.map((x, i) => (typeof x === 'string' ? <PastText key={i} text={x} look="terminal" /> : link(x.n, i)))}
           {extra.map((n) => (
             <span key={`x${n}`}> {link(n, `l${n}`)}</span>
           ))}
         </span>
         {children}
       </div>
+    </div>
+  );
+}
+
+/** What a command you ran with `!` printed, under your line like a terminal. */
+function ShellOutput({ msg, onStop }: { msg: ChatMessageDTO; onStop: () => void }) {
+  const [open, setOpen] = useState(false);
+  const glyph = useSpinner(msg.status === 'running');
+  if (msg.status === 'running') {
+    return (
+      <div className="t-claude" aria-live="polite">
+        <span className="inline-block w-[2ch]">{glyph}</span>Running…{' '}
+        <span className="t-dim">
+          (
+          <button type="button" onClick={onStop} className="hover:t-fg">
+            esc to stop
+          </button>
+          )
+        </span>
+      </div>
+    );
+  }
+  const lines = msg.content.split('\n');
+  const shown = open ? lines : lines.slice(0, FOLD);
+  return (
+    <Tail tone={msg.status === 'done' ? 't-fg' : 't-err'}>
+      {shown.join('\n')}
+      <More count={lines.length - shown.length} onClick={() => setOpen(true)} />
+      {msg.error ? <span className="block t-err">{msg.error}</span> : null}
+    </Tail>
+  );
+}
+
+/** The agent's own summary after /compact: it replaces the conversation in the agent's context. */
+function SummaryBlock({ msg }: { msg: ChatMessageDTO }) {
+  const [open, setOpen] = useState(false);
+  const lines = msg.content.trim().split('\n');
+  const shown = open ? lines : lines.slice(0, 8);
+  return (
+    <div>
+      <Dot tone="t-claude">
+        <span className="font-bold t-fg">Conversation compacted</span>
+        <span className="t-dim"> · the agent continues from this summary</span>
+      </Dot>
+      <Tail>
+        {shown.join('\n')}
+        <More count={lines.length - shown.length} onClick={() => setOpen(true)} />
+      </Tail>
     </div>
   );
 }
@@ -309,7 +363,7 @@ function Turn({
   const hidden = cut ? lines.slice(0, cut).filter((l) => !l.you).length : 0;
   const notes = model.blocks.filter((b) => b.type === 'milestone');
   const current = [...items].reverse().find((s) => s.status === 'running' && s.kind !== 'say' && s.kind !== 'note');
-  const ai = [PROVIDER_NAME[providerOfRuntime(msg.runtime) ?? ''], modelLabel(msg.model)?.replace(/^Claude /, '')].filter(Boolean).join(' ');
+  const ai = [PROVIDER_NAME[providerOfRuntime(msg.runtime, msg.model) ?? ''], modelLabel(msg.model)?.replace(/^Claude /, '')].filter(Boolean).join(' ');
 
   return (
     <div className="flex flex-col gap-[0.9em]">
@@ -413,7 +467,7 @@ function Transcript({ chat, folder, onRetry, onUnqueue, onStop }: { chat: Conver
       {chat.messages.map((m, i) =>
         m.role === 'user' ? (
           m.status === 'steered' ? null : (
-            <UserLine key={m.id} text={m.content} attachments={m.attachments} dim={m.status === 'queued'} strike={m.status === 'cancelled'}>
+            <UserLine key={m.id} text={chat.messages[i + 1]?.kind === 'shell' ? m.content.replace(/^!\s*/, '') : m.content} glyph={chat.messages[i + 1]?.kind === 'shell' ? '!' : '>'} attachments={m.attachments} dim={m.status === 'queued'} strike={m.status === 'cancelled'}>
               {m.status === 'queued' ? (
                 <span className="t-dim">
                   {' '}
@@ -428,6 +482,10 @@ function Transcript({ chat, folder, onRetry, onUnqueue, onStop }: { chat: Conver
               ) : null}
             </UserLine>
           )
+        ) : m.kind === 'shell' ? (
+          <ShellOutput key={m.id} msg={m} onStop={onStop} />
+        ) : m.kind === 'summary' && m.status === 'done' ? (
+          <SummaryBlock key={m.id} msg={m} />
         ) : (
           <Turn
             key={m.id}
@@ -509,6 +567,7 @@ function TermInput({ external, active, placeholder, ...opts }: PromptOptions & {
     <div {...p.dropProps}>
       {p.improving ? <div className="px-[1ch] pb-[0.2em] t-claude">✻ Improving your request…</div> : null}
       {p.notice ? <div className="px-[1ch] pb-[0.2em] t-warn">{p.notice}</div> : null}
+      {p.info ? <div className="whitespace-pre-wrap px-[1ch] pb-[0.2em] t-dim">{p.info.join('\n')}</div> : null}
       {p.images.length ? (
         <div className="flex flex-wrap gap-x-[2ch] px-[1ch] pb-[0.2em] t-dim">
           {p.images.map((img) => (
@@ -523,8 +582,8 @@ function TermInput({ external, active, placeholder, ...opts }: PromptOptions & {
       ) : null}
       <div className={cn('rounded-[6px] border px-[1ch] py-[0.15em]', p.dragging ? 't-box-perm' : 't-box focus-within:t-box-claude')}>
         <div className="grid grid-cols-[2ch_minmax(0,1fr)]">
-          <span className="select-none t-fg" aria-hidden>
-            &gt;
+          <span className={cn('select-none', p.shellMode ? 't-perm' : 't-fg')} aria-hidden>
+            {p.shellMode ? '!' : '>'}
           </span>
           <textarea
             {...p.textarea}
@@ -538,7 +597,25 @@ function TermInput({ external, active, placeholder, ...opts }: PromptOptions & {
           />
         </div>
       </div>
-      {p.suggestions.length ? (
+      {p.files.length ? (
+        <div className="px-[1ch] pt-[0.2em]" role="listbox" aria-label="Files">
+          {p.files.map((path, i) => (
+            <button
+              key={path}
+              type="button"
+              role="option"
+              aria-selected={i === p.fileIndex}
+              onMouseEnter={() => p.setFileSel(i)}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => p.pickFile(path)}
+              className={cn('block w-full truncate text-left', i === p.fileIndex ? 't-perm' : 't-dim')}
+            >
+              @{path}
+            </button>
+          ))}
+          <div className="t-faint">↑↓ to choose · tab or enter to insert · esc to close</div>
+        </div>
+      ) : p.suggestions.length ? (
         <div className="px-[1ch] pt-[0.2em]" role="listbox" aria-label="Commands">
           {p.suggestions.slice(p.windowStart, p.windowStart + 8).map((c, n) => {
             const i = p.windowStart + n;
@@ -696,7 +773,13 @@ function TermRunning({ repo, tab, sessionId, active, onExpand }: { repo: RepoDTO
   const navigate = useNavigate();
   const chat = useChat(sessionId);
   const invalidate = [keys.chats, keys.chat(sessionId)];
-  const send = useAction((v: { message: string; now?: boolean; images?: ChatImageInput[] }) => post<ConversationDetailDTO>(`/api/chats/${sessionId}/messages`, v), { invalidate });
+  const send = useAction((v: { message: string; now?: boolean; images?: ChatImageInput[]; permissionMode?: SessionPermissionMode }) => post<ConversationDetailDTO>(`/api/chats/${sessionId}/messages`, v), { invalidate });
+  const compact = useAction((focus: string) => post<ConversationDetailDTO>(`/api/chats/${sessionId}/compact`, { focus }), { invalidate });
+  const rewind = useAction((v: { messageId: string; code: boolean; conversation: boolean }) => post<{ chat: ConversationDetailDTO; message: string }>(`/api/chats/${sessionId}/rewind`, v), {
+    success: 'Rewound to before that message',
+    invalidate: [...invalidate, keys.changes(repo.id)],
+  });
+  const shell = useAction((command: string) => post<ConversationDetailDTO>(`/api/repos/${repo.id}/shell`, { command, chatId: sessionId }), { invalidate });
   const unqueue = useAction((messageId: string) => del<ConversationDetailDTO>(`/api/chats/${sessionId}/messages/${messageId}`), { invalidate });
   const stop = useAction(() => post(`/api/chats/${sessionId}/cancel`), { invalidate });
   const update = useAction((v: Record<string, unknown>) => patch(`/api/chats/${sessionId}`, v), { invalidate });
@@ -709,6 +792,7 @@ function TermRunning({ repo, tab, sessionId, active, onExpand }: { repo: RepoDTO
   const [menu, setMenu] = useState<MenuKind | null>(null);
   const [showChanges, setShowChanges] = useState(false);
   const [dismissed, setDismissed] = useState<string[]>([]);
+  const [planSeen, setPlanSeen] = useState<string | null>(null);
   const { root, onMouseUp } = useClickToFocus();
   const c = chat.data;
   const size = c ? c.events.length + c.messages.length * 1000 + (c.messages.at(-1)?.content.length ?? 0) + (c.approval ? 7 : 0) : 0;
@@ -733,7 +817,8 @@ function TermRunning({ repo, tab, sessionId, active, onExpand }: { repo: RepoDTO
   const editing = c.mode === 'edit';
   const canEdit = repo.allowModify && repo.isGit;
   const securitySeat = c.seat === 'security';
-  const lastAgent = [...c.messages].reverse().find((m) => m.role === 'assistant');
+  // A command you ran yourself with `!` is not the agent's answer, even when it failed.
+  const lastAgent = [...c.messages].reverse().find((m) => m.role === 'assistant' && m.kind !== 'shell');
   const blocked: BlockedCommand[] = !running && lastAgent ? lastAgent.blocked.filter((b) => !dismissed.includes(b.command) && !c.allowedCommands.includes(b.command)) : [];
   const state: PaneState = c.approval || blocked.length ? 'needs' : running ? 'working' : lastAgent?.status === 'failed' ? 'failed' : lastAgent ? 'done' : 'new';
   const ai = c.agentRuntime ? (PROVIDER_NAME[providerOfRuntime(c.agentRuntime) ?? ''] ?? 'The agent') : c.provider === 'auto' ? 'The agent' : PROVIDER_NAME[c.provider];
@@ -780,7 +865,25 @@ function TermRunning({ repo, tab, sessionId, active, onExpand }: { repo: RepoDTO
     };
   };
 
-  const external = c.approval ? approvalDialog(c.approval) : blocked[0] ? blockedDialog(blocked[0]) : null;
+  // Plan mode: once the agent has proposed its plan, you decide how it goes on (like Claude Code's plan approval).
+  const plan = !running && canEdit && !securitySeat ? planAwaitingApproval(promptMode(c.mode, c.permissionMode), c.messages) : null;
+  const planDialog: PromptMenu | null =
+    plan && planSeen !== plan.id
+      ? {
+          key: `plan:${plan.id}`,
+          tone: 'perm',
+          title: 'Ready to code?',
+          body: 'The plan is above. Nothing has been changed yet.',
+          question: 'Would you like to proceed?',
+          options: [
+            { label: 'Yes, and auto-accept commands', hint: '(runs commands on its own; risky ones are still blocked)', run: () => send.mutate({ message: APPROVE_PLAN, permissionMode: 'auto' }) },
+            { label: 'Yes, and ask before running commands', run: () => send.mutate({ message: APPROVE_PLAN, permissionMode: 'ask' }) },
+            { label: 'No, keep planning', hint: '(esc)', run: () => (setPlanSeen(plan.id), focusPrompt()) },
+          ],
+          onCancel: () => (setPlanSeen(plan.id), focusPrompt()),
+        }
+      : null;
+  const external = c.approval ? approvalDialog(c.approval) : blocked[0] ? blockedDialog(blocked[0]) : planDialog;
   const history = c.messages.filter((m) => m.role === 'user').map((m) => m.content).reverse();
 
   return (
@@ -830,6 +933,8 @@ function TermRunning({ repo, tab, sessionId, active, onExpand }: { repo: RepoDTO
           history={history}
           active={active}
           suggestion={c.nextPrompt}
+          messages={c.messages}
+          onShell={canEdit ? (command, done) => shell.mutate(command, { onSuccess: done }) : undefined}
           placeholder={running ? (c.steerable ? `Message ${ai === 'The agent' ? 'the agent' : ai}: it reads it at its next step` : 'Type a message: it is sent when the agent finishes') : ''}
           commands={{
             clear: actions.clear,
@@ -839,8 +944,20 @@ function TermRunning({ repo, tab, sessionId, active, onExpand }: { repo: RepoDTO
                   changes: () => setShowChanges(true),
                   commit: (m: string) => actions.commit(m, () => setShowChanges(true)),
                   security: actions.security,
+                  rewind: (messageId: string, what: { code: boolean; conversation: boolean }) =>
+                    rewind.mutate(
+                      { messageId, ...what },
+                      {
+                        onSuccess: (r) => {
+                          // Your message goes back in the prompt, to change and send again.
+                          if (what.conversation) setDraft(r.message);
+                          focusPrompt();
+                        },
+                      },
+                    ),
                 }
               : {}),
+            compact: (focus: string) => compact.mutate(focus),
             close: () => tabs.close(tab.key),
             ...(onExpand ? { expand: onExpand } : {}),
             remove: () =>
@@ -862,7 +979,7 @@ function TermNew({ repo, tab, active, onExpand }: { repo: RepoDTO; tab: Workspac
   const navigate = useNavigate();
   const settings = useSettings();
   const canEdit = repo.allowModify && repo.isGit;
-  const [draft, setDraft] = useState('');
+  const [draft, setDraft] = useState(() => takeDraft(tab.key));
   const [sentText, setSentText] = useState<string | null>(null);
   const [provider, setProvider] = useState<Provider>('auto');
   const [model, setModel] = useState<string | null>(null);
@@ -889,6 +1006,7 @@ function TermNew({ repo, tab, active, onExpand }: { repo: RepoDTO; tab: Workspac
     },
     { invalidate: [keys.chats] },
   );
+  const shell = useAction((command: string) => post<ConversationDetailDTO>(`/api/repos/${repo.id}/shell`, { command }), { invalidate: [keys.chats] });
   const focusPrompt = () => requestAnimationFrame(() => root.current?.querySelector<HTMLElement>('[data-term-focus]')?.focus({ preventScroll: true }));
   const tips = STARTERS.filter((s) => mode !== 'read-only' || s.label === 'Explain this project');
 
@@ -963,13 +1081,25 @@ function TermNew({ repo, tab, active, onExpand }: { repo: RepoDTO; tab: Workspac
             });
           }}
           external={null}
+          onShell={
+            canEdit
+              ? (command, done) =>
+                  shell.mutate(command, {
+                    onSuccess: (c) => {
+                      done();
+                      tabs.attach(tab.key, c.id);
+                      navigate(`/s/${c.id}`);
+                    },
+                  })
+              : undefined
+          }
           menu={menu}
           setMenu={setMenu}
           history={[]}
           active={active}
           placeholder={mode === 'read-only' ? `Ask about ${repo.name}…` : 'Try "explain this project" or describe a change'}
           commands={{
-            clear: () => setDraft(''),
+            clear: (d?: string) => setDraft(d ?? ''),
             open: actions.open,
             ...(canEdit
               ? {

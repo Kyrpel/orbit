@@ -52,6 +52,52 @@ function shortPath(p: string, cwd: string): string {
   return p.split(/[\\/]+/).slice(-2).join('/');
 }
 
+/**
+ * Codex's own web tool (search, open page) runs on OpenAI's side and is not covered by the
+ * sandbox's network setting, so it has its own switch. It follows Orbit's "Allow agent web
+ * access": off means no web at all, on means live pages (not just OpenAI's cached results).
+ */
+export function codexWebArgs(allowWeb: boolean): string[] {
+  return ['-c', `web_search="${allowWeb ? 'live' : 'disabled'}"`];
+}
+
+/** What Codex's built-in web tool did: a search, opening a page, or looking for text inside one. */
+export interface CodexWebAction {
+  type?: string;
+  query?: string | null;
+  queries?: string[] | null;
+  url?: string | null;
+  pattern?: string | null;
+}
+
+/**
+ * Codex has no separate fetch tool: its web tool searches, opens pages (`openPage`, or
+ * `open_page` in `codex exec`) and finds text in them. Opening a page is what Claude Code
+ * calls WebFetch, so it becomes a `Fetch(url)` step; a search stays a Web Search. The action
+ * (and the query or url) can be missing while the step is still starting, so this returns
+ * null until Codex has said what it is doing. Exported for tests.
+ */
+export function codexWebStep(item: { id?: string; query?: string | null; action?: CodexWebAction | null }): AgentEvent | null {
+  const action: CodexWebAction = item.action ?? {};
+  const kind = String(action.type ?? '').replace(/_/g, '').toLowerCase();
+  const url = (action.url ?? '').trim();
+  const query = (action.query ?? action.queries?.[0] ?? item.query ?? '').trim();
+  if ((kind === 'openpage' || kind === 'findinpage') && url) {
+    const shown = redactSecrets(url).slice(0, 300);
+    return { type: 'tool', tool: 'WebFetch', id: item.id, summary: `Fetch ${shown.slice(0, 140)}`, step: 'web', target: shown };
+  }
+  // Without an action, a query that is only an address is a page being opened, not searched for.
+  if ((!kind || kind === 'other') && /^https?:\/\/\S+$/i.test(query)) {
+    const shown = redactSecrets(query).slice(0, 300);
+    return { type: 'tool', tool: 'WebFetch', id: item.id, summary: `Fetch ${shown.slice(0, 140)}`, step: 'web', target: shown };
+  }
+  if (query) {
+    const shown = redactSecrets(query);
+    return { type: 'tool', tool: 'WebSearch', id: item.id, summary: `Search the web for ${JSON.stringify(shown).slice(0, 80)}`, step: 'web', target: shown.slice(0, 200) };
+  }
+  return null;
+}
+
 type CodexItem = {
   id?: string;
   type?: string;
@@ -62,6 +108,7 @@ type CodexItem = {
   status?: string;
   changes?: { path: string; kind: string }[];
   query?: string;
+  action?: CodexWebAction | null;
   server?: string;
   tool?: string;
   items?: { text: string; completed: boolean }[];
@@ -72,10 +119,20 @@ type CodexItem = {
  * Translates one Codex `--json` event into Orbit agent events. Codex reports
  * both the start and the end of each step, so failures carry the real exit code.
  */
-export function translateCodexEvent(event: { type?: string; item?: CodexItem }, cwd: string, onEvent: (e: AgentEvent) => void): void {
+export function translateCodexEvent(event: { type?: string; item?: CodexItem }, cwd: string, onEvent: (e: AgentEvent) => void, webSeen: Set<string> = new Set()): void {
   const item = event.item;
   if (!item?.type) return;
   const id = item.id;
+  // A web step is shown once, when Codex first says what it is searching or opening (at the
+  // start if it already knows, otherwise when the step completes).
+  if (item.type === 'web_search' && (event.type === 'item.started' || event.type === 'item.completed')) {
+    const step = codexWebStep(item);
+    if (step && !(id && webSeen.has(id))) {
+      if (id) webSeen.add(id);
+      onEvent(step);
+    }
+    return;
+  }
   if (event.type === 'item.started') {
     if (item.type === 'command_execution' && item.command) {
       const cmd = redactSecrets(unwrapShellCommand(item.command));
@@ -86,8 +143,6 @@ export function translateCodexEvent(event: { type?: string; item?: CodexItem }, 
         const verb = c.kind === 'add' ? 'Write' : c.kind === 'delete' ? 'Delete' : 'Edit';
         onEvent({ type: 'tool', tool: verb === 'Write' ? 'Write' : 'Edit', id, summary: `${verb} ${path.basename(c.path)}`, step: 'edit', target: file });
       }
-    } else if (item.type === 'web_search') {
-      onEvent({ type: 'tool', tool: 'WebSearch', id, summary: `Search the web for ${JSON.stringify(item.query ?? '').slice(0, 80)}`, step: 'web', target: item.query ?? null });
     } else if (item.type === 'mcp_tool_call') {
       onEvent({ type: 'tool', tool: item.tool ?? 'tool', id, summary: `${item.server ?? 'mcp'}: ${item.tool ?? 'tool'}`, step: 'other', target: null });
     }
@@ -182,6 +237,7 @@ export class CodexCliRuntime implements AgentRuntime {
     // "elevated" it lets tools installed in the user folder run (Python, Node, npm under C:/Users).
     if (this.platform === 'win32') args.push('-c', 'windows.sandbox="unelevated"');
     if (req.access === 'workspace-write' && req.execution.allowNetworkTools) args.push('-c', 'sandbox_workspace_write.network_access=true');
+    args.push(...codexWebArgs(req.execution.allowNetworkTools));
     if (req.model) args.push('-m', req.model);
     if (req.effort) args.push('-c', `model_reasoning_effort="${req.effort}"`);
     if (schemaFile && !resumeId) args.push('--output-schema', schemaFile);
@@ -232,6 +288,7 @@ export class CodexCliRuntime implements AgentRuntime {
     let turnError: string | null = null;
     let completed = false;
     let turns = 0;
+    const webSeen = new Set<string>();
 
     // No Claude credentials: Codex authenticates with its own login.
     const env = buildAgentEnv(this.env, {}, false);
@@ -271,12 +328,12 @@ export class CodexCliRuntime implements AgentRuntime {
           else if (ev.type === 'turn.completed') {
             completed = true;
             const u = ev.usage ?? {};
-            usage = { inputTokens: u.input_tokens ?? 0, outputTokens: (u.output_tokens ?? 0) + (u.reasoning_output_tokens ?? 0), cacheReadTokens: u.cached_input_tokens ?? 0, cacheWriteTokens: u.cache_write_input_tokens ?? 0 };
+            usage = { inputTokens: Math.max(0, (u.input_tokens ?? 0) - (u.cached_input_tokens ?? 0)), outputTokens: u.output_tokens ?? 0, cacheReadTokens: u.cached_input_tokens ?? 0, cacheWriteTokens: u.cache_write_input_tokens ?? 0 };
           } else if (ev.type === 'turn.failed') turnError = ev.error?.message ?? 'Codex reported a failed turn.';
           else if (ev.type === 'error') turnError = ev.message ?? ev.error?.message ?? 'Codex reported an error.';
           else {
             if (ev.type === 'item.completed' && ev.item?.type === 'agent_message' && ev.item.text) text = ev.item.text;
-            translateCodexEvent(ev, req.cwd, ctx.onEvent);
+            translateCodexEvent(ev, req.cwd, ctx.onEvent, webSeen);
           }
         }
       }

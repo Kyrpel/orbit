@@ -391,4 +391,16 @@ ALTER TABLE reviews ADD COLUMN kind TEXT NOT NULL DEFAULT 'quality';
     id: '0011_message_attachments',
     sql: `ALTER TABLE conversation_messages ADD COLUMN attachments TEXT;`,
   },
+  {
+    id: '0012_session_usage_checkpoints_compact',
+    sql: `
+ALTER TABLE conversation_messages ADD COLUMN usage TEXT;
+ALTER TABLE conversation_messages ADD COLUMN checkpoint TEXT;
+ALTER TABLE conversations ADD COLUMN compact_from TEXT;
+`,
+  },
+  {
+    id: '0013_plan_message_kind',
+    sql: `ALTER TABLE conversation_messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat';`,
+  },
 ];

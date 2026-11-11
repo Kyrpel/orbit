@@ -232,7 +232,13 @@ export function SettingsPage() {
             >
               <Switch checked={s.execution.suggestNext} onCheckedChange={(v) => set({ execution: { suggestNext: v } })} label="Suggest my next message" />
             </Row>
-            <Row title="Allow agents to use the web" description="WebFetch and WebSearch are off by default: task text is untrusted, and the web is an easy way to leak code.">
+            <Row
+              title="Sessions from Claude Code and Codex"
+              description="Session agents can look up what you did in Claude Code or Codex outside Orbit, in any folder, when your message builds on it. /past gives the agent one session, and /resume continues one. Orbit keeps short transcripts in its data folder (what was asked and answered, commands and changed files, no command output). They stay on this computer, and only the AI you use reads them."
+            >
+              <Switch checked={s.execution.pastSessions} onCheckedChange={(v) => set({ execution: { pastSessions: v } })} label="Let agents use my Claude Code and Codex sessions" />
+            </Row>
+              <Row title="Allow agents to use the web" description="Off by default. Enables Claude's WebFetch and WebSearch, Codex's web tool, and network access in Codex's sandbox. Applies to new runs. Shell commands and MCP servers follow their own permissions.">
               <Switch checked={s.execution.allowAgentNetwork} onCheckedChange={(v) => set({ execution: { allowAgentNetwork: v } })} label="Allow agent web access" />
             </Row>
             <Row title="Missions at the same time" description="How many missions may have an agent working at once.">

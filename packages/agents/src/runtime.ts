@@ -54,6 +54,45 @@ export interface AgentRunRequest {
   allowGit?: boolean;
   /** Images the developer attached to the message (saved by Orbit; the agent sees them). */
   images?: AgentImage[];
+  /**
+   * Run Claude Code against another Anthropic-compatible API (OpenRouter) with this key,
+   * instead of your Claude login; `model` is that API's model id. `tools: false` is for models
+   * that cannot use tools: the agent then has none and can only answer. Claude Code CLI only.
+   */
+  gateway?: AgentGateway | null;
+}
+
+export interface AgentGateway {
+  name: string;
+  baseUrl: string;
+  token: string;
+  model: string;
+  tools: boolean;
+  /** Normalize Claude Code's mid-conversation system turns for strict llama.cpp templates. */
+  compatibility?: 'llamacpp';
+}
+
+/**
+ * The environment Claude Code needs to talk to a gateway instead of Anthropic: its address and
+ * key, and the gateway's model everywhere Claude Code would pick one of Claude's own (background
+ * calls, subagents), so nothing silently goes to another model.
+ */
+export function gatewayEnv(g: AgentGateway): Record<string, string> {
+  return {
+    ANTHROPIC_BASE_URL: g.baseUrl,
+    ANTHROPIC_AUTH_TOKEN: g.token,
+    ANTHROPIC_MODEL: g.model,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: g.model,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: g.model,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: g.model,
+    ANTHROPIC_SMALL_FAST_MODEL: g.model,
+    CLAUDE_CODE_SUBAGENT_MODEL: g.model,
+    // Claude Code asks for Claude's own "adaptive" thinking otherwise, which other models may refuse
+    // (checked with Claude Code 2.1.322: with 0 the request carries no thinking setting at all).
+    MAX_THINKING_TOKENS: '0',
+    // No update checks, telemetry or error reports: only the model calls leave.
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+  };
 }
 
 /** An image attached to a message, as a file Orbit saved. */
@@ -174,6 +213,11 @@ export interface AgentRunResult {
   sessionId: string | null;
   model: string | null;
   error: string | null;
+  /**
+   * How full the agent's context is after this answer: the size of its last request and the
+   * model's window (null when unknown). Working sessions show it as /context.
+   */
+  context?: { tokens: number; window: number | null } | null;
   /** Tool calls that were refused; `command` is set for shell commands that need approval. */
   deniedTools: { tool: string; reason: string; command?: string }[];
 }

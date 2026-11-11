@@ -2,6 +2,7 @@ import { PROMPTER_SYSTEM, PrompterOutput, prompterOutputSchema, prompterPrompt, 
 import { OrbitError, truncate, type RepoDTO, type TaskImprovementDTO } from '@orbit/shared';
 import { audit, type OrbitContext } from './context';
 import type { IntegrationService } from './integrations';
+import type { GatewayProvider } from './gateways';
 import type { RepoService } from './repos';
 import { forgetResolvedRuntime } from './runtimes';
 import { forgetCodexAvailability, planSeat, type SeatCandidate } from './team';
@@ -20,6 +21,8 @@ export class PromptEngineer {
     private readonly ctx: OrbitContext,
     private readonly integrations: IntegrationService,
     private readonly repos: RepoService,
+    /** OpenRouter and your Hugging Face endpoints (see `ChatService`). */
+    private readonly gateways: GatewayProvider[] = [],
   ) {}
 
   /** Proposes a better version of a tracker task. Read-only. */
@@ -52,18 +55,23 @@ export class PromptEngineer {
     return { url: updated.url };
   }
 
-  /** Improves a request before it is sent to a working session. Read-only. */
-  async improveText(input: { text: string; repoId?: string | null }): Promise<TaskImprovementDTO> {
+  /**
+   * Improves a request before it is sent to a working session. Read-only. `gateway`: the session
+   * uses OpenRouter or a Hugging Face endpoint, so its own model (or that AI's default) does the
+   * rewrite, never Claude or Codex.
+   */
+  async improveText(input: { text: string; repoId?: string | null; gateway?: { provider: 'openrouter' | 'huggingface'; model: string | null } | null }): Promise<TaskImprovementDTO> {
     const text = input.text.trim();
     if (!text) throw new OrbitError('VALIDATION', 'Type something to improve first.');
     const repos = input.repoId ? this.repos.list().filter((r) => r.id === input.repoId) : [];
     const firstLine = text.split('\n')[0] ?? text;
-    const out = await this.run({ title: truncate(firstLine, 200), description: text, comments: [], repos, purpose: 'session' });
+    const out = await this.run({ title: truncate(firstLine, 200), description: text, comments: [], repos, purpose: 'session', gateway: input.gateway ?? null });
     return { ...out, original: { title: truncate(firstLine, 200), description: text } };
   }
 
-  private async run(args: { title: string; description: string; comments: { author?: string; text: string }[]; repos: RepoDTO[]; purpose: 'task' | 'session' }): Promise<Omit<TaskImprovementDTO, 'original'>> {
-    const plan = await planSeat(this.ctx, 'prompter');
+  private async run(args: { title: string; description: string; comments: { author?: string; text: string }[]; repos: RepoDTO[]; purpose: 'task' | 'session'; gateway?: { provider: 'openrouter' | 'huggingface'; model: string | null } | null }): Promise<Omit<TaskImprovementDTO, 'original'>> {
+    const viaOpenRouter = args.gateway ? await this.gatewaySeat(args.gateway.provider, args.gateway.model) : null;
+    const plan = viaOpenRouter ? { primary: viaOpenRouter.candidate, fallback: null } : await planSeat(this.ctx, 'prompter');
     if (!plan.primary || !plan.primary.availability.available) {
       throw new OrbitError('PRECONDITION', plan.primary ? `${plan.primary.runtime.displayName} is not ready: ${plan.primary.availability.reason ?? 'unavailable'}` : 'No AI is connected. Sign in to Claude Code or Codex.');
     }
@@ -96,7 +104,7 @@ export class PromptEngineer {
       execution: { mode: 'trusted-local', allowNetworkTools: false },
     };
     let used: SeatCandidate = plan.primary;
-    let result = await this.once(used, base);
+    let result = await this.once(used, viaOpenRouter ? { ...base, gateway: viaOpenRouter.gateway } : base);
     if (result.status === 'rate_limited' && plan.fallback) {
       used = plan.fallback;
       result = await this.once(used, base);
@@ -109,8 +117,22 @@ export class PromptEngineer {
     return { ...parsed.data, runtime: used.runtime.id, model: used.model };
   }
 
+  /**
+   * The session's own model for /improve. It answers in a structured form, which needs tool use;
+   * a sleeping Hugging Face endpoint is not woken for it (send a message first).
+   */
+  private async gatewaySeat(provider: 'openrouter' | 'huggingface', model: string | null) {
+    const gw = this.gateways.find((g) => g.id === provider);
+    if (!gw) throw new OrbitError('PRECONDITION', `${provider} is not available here.`);
+    const s = await gw.seat(model, { wake: false });
+    if (!s.gateway.tools) {
+      throw new OrbitError('PRECONDITION', `${gw.info(s.candidate.model ?? '').name} cannot use tools, so it cannot run Improve.`, { hint: 'Pick a model that can work in your project for this session, or improve the text yourself.' });
+    }
+    return s;
+  }
+
   private async once(seat: SeatCandidate, base: Omit<AgentRunRequest, 'model' | 'effort'>): Promise<AgentRunResult> {
-    const result = await seat.runtime.run({ ...base, model: seat.model, effort: seat.effort }, { signal: AbortSignal.timeout(PROMPTER_TIMEOUT_MS + 30_000), onEvent: () => undefined });
+    const result = await seat.runtime.run({ ...base, model: base.gateway ? base.gateway.model : seat.model, effort: base.gateway ? null : seat.effort }, { signal: AbortSignal.timeout(PROMPTER_TIMEOUT_MS + 30_000), onEvent: () => undefined });
     if (result.status === 'rate_limited' || result.status === 'failed') {
       forgetResolvedRuntime(this.ctx);
       forgetCodexAvailability(this.ctx);

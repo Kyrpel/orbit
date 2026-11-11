@@ -1,4 +1,4 @@
-import type { AgentRuntime, RuntimeAvailability } from '@orbit/agents';
+import type { AgentGateway, AgentRuntime, RuntimeAvailability } from '@orbit/agents';
 import type { AiProvider, EffortLevel, ProviderStatusDTO, SeatResolutionDTO, TeamDTO, TeamSeat } from '@orbit/shared';
 import type { OrbitContext } from './context';
 import { resolveRuntime } from './runtimes';
@@ -22,6 +22,8 @@ export interface SeatCandidate {
   label: string;
   model: string | null;
   effort: EffortLevel | null;
+  /** OpenRouter or your Hugging Face endpoint: Claude Code runs this model with that AI's key, never your Claude login. */
+  gateway?: AgentGateway;
 }
 
 export interface SeatPlan {
@@ -167,7 +169,7 @@ export function worktreeRoot(ctx: OrbitContext): string {
   return ctx.settings.get().execution.worktreeRoot || ctx.paths.worktrees;
 }
 
-export async function teamStatus(ctx: OrbitContext): Promise<TeamDTO> {
+export async function teamStatus(ctx: OrbitContext): Promise<Omit<TeamDTO, 'openrouter' | 'huggingface'>> {
   const settings = ctx.settings.get();
   const p = await providers(ctx);
   const list: ProviderStatusDTO[] = [];
