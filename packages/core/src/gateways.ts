@@ -11,14 +11,15 @@ import { planSeat, type SeatCandidate } from './team';
 */
 
 export interface GatewaySeat {
-  /** Claude Code (the program only) with this AI's model; `gateway` is attached. */
-  candidate: SeatCandidate & { gateway: AgentGateway };
-  gateway: AgentGateway;
+  /** Who runs it: Claude Code (the program only) with `gateway` attached, or the AI's own CLI (Cursor). */
+  candidate: SeatCandidate;
+  /** The Anthropic-compatible API Claude Code talks to; null when the AI runs its own CLI. */
+  gateway: AgentGateway | null;
 }
 
 export interface GatewayProvider {
   /** The session provider it serves. */
-  readonly id: 'openrouter' | 'huggingface';
+  readonly id: 'openrouter' | 'huggingface' | 'cursor';
   /** "OpenRouter", "Hugging Face". */
   readonly label: string;
   /** For the model's own note on who it is: "served through OpenRouter". */

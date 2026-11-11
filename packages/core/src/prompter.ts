@@ -60,7 +60,7 @@ export class PromptEngineer {
    * uses OpenRouter or a Hugging Face endpoint, so its own model (or that AI's default) does the
    * rewrite, never Claude or Codex.
    */
-  async improveText(input: { text: string; repoId?: string | null; gateway?: { provider: 'openrouter' | 'huggingface'; model: string | null } | null }): Promise<TaskImprovementDTO> {
+  async improveText(input: { text: string; repoId?: string | null; gateway?: { provider: 'openrouter' | 'huggingface' | 'cursor'; model: string | null } | null }): Promise<TaskImprovementDTO> {
     const text = input.text.trim();
     if (!text) throw new OrbitError('VALIDATION', 'Type something to improve first.');
     const repos = input.repoId ? this.repos.list().filter((r) => r.id === input.repoId) : [];
@@ -69,7 +69,7 @@ export class PromptEngineer {
     return { ...out, original: { title: truncate(firstLine, 200), description: text } };
   }
 
-  private async run(args: { title: string; description: string; comments: { author?: string; text: string }[]; repos: RepoDTO[]; purpose: 'task' | 'session'; gateway?: { provider: 'openrouter' | 'huggingface'; model: string | null } | null }): Promise<Omit<TaskImprovementDTO, 'original'>> {
+  private async run(args: { title: string; description: string; comments: { author?: string; text: string }[]; repos: RepoDTO[]; purpose: 'task' | 'session'; gateway?: { provider: 'openrouter' | 'huggingface' | 'cursor'; model: string | null } | null }): Promise<Omit<TaskImprovementDTO, 'original'>> {
     const viaOpenRouter = args.gateway ? await this.gatewaySeat(args.gateway.provider, args.gateway.model) : null;
     const plan = viaOpenRouter ? { primary: viaOpenRouter.candidate, fallback: null } : await planSeat(this.ctx, 'prompter');
     if (!plan.primary || !plan.primary.availability.available) {
@@ -121,11 +121,11 @@ export class PromptEngineer {
    * The session's own model for /improve. It answers in a structured form, which needs tool use;
    * a sleeping Hugging Face endpoint is not woken for it (send a message first).
    */
-  private async gatewaySeat(provider: 'openrouter' | 'huggingface', model: string | null) {
+  private async gatewaySeat(provider: 'openrouter' | 'huggingface' | 'cursor', model: string | null) {
     const gw = this.gateways.find((g) => g.id === provider);
     if (!gw) throw new OrbitError('PRECONDITION', `${provider} is not available here.`);
     const s = await gw.seat(model, { wake: false });
-    if (!s.gateway.tools) {
+    if (s.gateway && !s.gateway.tools) {
       throw new OrbitError('PRECONDITION', `${gw.info(s.candidate.model ?? '').name} cannot use tools, so it cannot run Improve.`, { hint: 'Pick a model that can work in your project for this session, or improve the text yourself.' });
     }
     return s;

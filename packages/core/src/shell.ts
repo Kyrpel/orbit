@@ -21,10 +21,17 @@ export interface ShellRun {
   durationMs: number;
 }
 
+/**
+ * On Windows, a program you installed after Orbit started (say `cursor-agent`) is on the PATH of
+ * new terminal windows but not on Orbit's own. Each `!` command first takes the PATH a new window
+ * would get (machine, then user) and keeps Orbit's own entries after it.
+ */
+export const FRESH_WINDOWS_PATH = "$env:Path = (@([Environment]::GetEnvironmentVariable('Path','Machine'), [Environment]::GetEnvironmentVariable('Path','User'), $env:Path) | Where-Object { $_ }) -join ';'; ";
+
 /** The shell Orbit uses for the platform: PowerShell on Windows (as the agents' own shell), sh elsewhere. */
 export function shellInvocation(platform: NodeJS.Platform, command: string): { file: string; args: string[] } {
   return platform === 'win32'
-    ? { file: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command] }
+    ? { file: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', `${FRESH_WINDOWS_PATH}${command}`] }
     : { file: '/bin/sh', args: ['-c', command] };
 }
 

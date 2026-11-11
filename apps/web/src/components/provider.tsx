@@ -1,10 +1,10 @@
-import { HF_PREFIX, isHfModel, isOpenRouterModel, KNOWN_MODELS, openRouterSlug } from '@orbit/shared';
+import { CURSOR_PREFIX, HF_PREFIX, isHfModel, isOpenRouterModel, KNOWN_MODELS, openRouterSlug } from '@orbit/shared';
 import { cn } from '../lib/utils';
 
-export type ProviderKey = 'claude' | 'codex' | 'openrouter' | 'huggingface' | 'scripted' | null | undefined;
+export type ProviderKey = 'claude' | 'codex' | 'openrouter' | 'huggingface' | 'cursor' | 'scripted' | null | undefined;
 
-export const PROVIDER_NAME: Record<string, string> = { claude: 'Claude', codex: 'Codex', openrouter: 'OpenRouter', huggingface: 'Hugging Face', scripted: 'Scripted' };
-export const PROVIDER_TEXT: Record<string, string> = { claude: 'text-claude', codex: 'text-codex', openrouter: 'text-openrouter', huggingface: 'text-huggingface', scripted: 'text-dust' };
+export const PROVIDER_NAME: Record<string, string> = { claude: 'Claude', codex: 'Codex', openrouter: 'OpenRouter', huggingface: 'Hugging Face', cursor: 'Cursor', scripted: 'Scripted' };
+export const PROVIDER_TEXT: Record<string, string> = { claude: 'text-claude', codex: 'text-codex', openrouter: 'text-openrouter', huggingface: 'text-huggingface', cursor: 'text-cursor', scripted: 'text-dust' };
 
 /** Who answered: `model` tells an OpenRouter answer apart (it runs in Claude Code, but it is not Claude). */
 export function providerOfRuntime(runtime: string | null | undefined, model?: string | null): ProviderKey {
@@ -12,6 +12,7 @@ export function providerOfRuntime(runtime: string | null | undefined, model?: st
   if (isOpenRouterModel(model) || runtime.includes(':openrouter:')) return 'openrouter';
   if (isHfModel(model) || runtime.includes(`:${HF_PREFIX}`)) return 'huggingface';
   if (runtime === 'codex-cli') return 'codex';
+  if (runtime === 'cursor-cli' || runtime.startsWith('cursor-cli:')) return 'cursor';
   if (runtime === 'scripted') return 'scripted';
   return 'claude';
 }
@@ -19,8 +20,9 @@ export function providerOfRuntime(runtime: string | null | undefined, model?: st
 /** "Claude Sonnet 5.5" for known Claude ids, the raw id otherwise. */
 export function modelLabel(model: string | null | undefined): string | null {
   if (!model) return null;
-  // `hf:my-endpoint` → "my-endpoint"
+  // `hf:my-endpoint` → "my-endpoint", `cursor:composer-2.5` → "composer-2.5"
   if (model.startsWith(HF_PREFIX)) return model.slice(HF_PREFIX.length);
+  if (model.startsWith(CURSOR_PREFIX)) return model.slice(CURSOR_PREFIX.length);
   // `openrouter:deepseek/deepseek-v4.1-flash-1017` → "deepseek-v4.1-flash-1017"
   if (isOpenRouterModel(model)) return openRouterSlug(model).split('/').pop() ?? model;
   return KNOWN_MODELS.find((m) => m.id === model)?.label ?? model;

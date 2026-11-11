@@ -122,10 +122,11 @@ export class HuggingFaceService implements GatewayProvider {
     const repository = parseHfRepository(input);
     if (!repository) throw new OrbitError('VALIDATION', 'Paste a Hugging Face model link, like https://huggingface.co/owner/model.');
     const token = this.token();
-    const [info, tree, hardware] = await Promise.all([
-      this.json<{ gated?: boolean | string; tags?: string[]; cardData?: { license?: string }; gguf?: { chat_template?: string } }>(`${this.hub}/api/models/${repository}`, token).catch((err: OrbitError) => {
-        throw err.code === 'NOT_FOUND' ? new OrbitError('NOT_FOUND', `Hugging Face has no model "${repository}", or it is private.`) : err;
-      }),
+    // Resolve the model first: a missing tree must not race the more useful model error.
+    const info = await this.json<{ gated?: boolean | string; tags?: string[]; cardData?: { license?: string }; gguf?: { chat_template?: string } }>(`${this.hub}/api/models/${repository}`, token).catch((err: OrbitError) => {
+      throw err.code === 'NOT_FOUND' ? new OrbitError('NOT_FOUND', `Hugging Face has no model "${repository}", or it is private.`) : err;
+    });
+    const [tree, hardware] = await Promise.all([
       this.json<{ type: string; path: string; size?: number; lfs?: { size?: number } }[]>(`${this.hub}/api/models/${repository}/tree/main?recursive=true`, token),
       this.hardware(),
     ]);

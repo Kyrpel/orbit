@@ -226,7 +226,10 @@ export class ClaudeCodeCliRuntime implements AgentRuntime {
     let adapter: Awaited<ReturnType<typeof startLlamaGateway>> | null = null;
 
     try {
-      if (req.gateway?.compatibility === 'llamacpp') adapter = await startLlamaGateway(req.gateway, controller.signal);
+      // Every gateway run goes through a local proxy with a throwaway token: the real OpenRouter
+      // or Hugging Face key never reaches Claude Code's environment, so the commands the agent
+      // runs (which inherit that environment) cannot read it.
+      if (req.gateway) adapter = await startLlamaGateway(req.gateway, controller.signal);
       const live = !!ctx.onSteerReady;
       // A long system prompt (your own instructions for a model can be long) goes in a file:
       // Windows refuses command lines over about 32,000 characters.

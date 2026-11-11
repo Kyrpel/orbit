@@ -6,10 +6,19 @@ All notable changes to Orbit are documented here. The format follows [Keep a Cha
 
 ### Fixed
 
+- Resolve Hugging Face model metadata before listing files so missing-model errors are consistent.
+
+- Authenticate encoded API paths using Fastify's matched route; reject off-site sign-in redirects using backslashes or control characters.
+- Preserve Cursor user deny rules, enforce disabled web fetching, ignore repository permission overrides, and fail closed when OS isolation is requested.
+- Update vulnerable static-serving and test dependencies; use patched esbuild in the CLI build.
+
 - Hugging Face resume errors report a missing payment method when the service returns a billing-related 403, instead of incorrectly asking for a different token.
 - Hugging Face sessions with Qwen and other strict llama.cpp chat templates combine Claude Code's system instructions before sending them, fixing the "System message must be at the beginning" error while preserving tools and streaming.
 
 ### Added
+
+- Cursor CLI sessions using your Cursor subscription, account models, and per-model instructions.
+- Auto, 2, 3 and 4-column workspace layouts and a 2× workspace video in the README.
 
 - Mission engine with an explicit state machine, durable SQLite job queue, restart recovery and an idempotent outbox for pushes, pull requests and task comments.
 - Planner, engineer and reviewer roles with structured outputs; automatic fix passes on failing checks or blocking review findings.

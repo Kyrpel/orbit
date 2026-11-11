@@ -7,6 +7,7 @@ import {
   compactPrompt,
   NEXT_PROMPT_SYSTEM,
   nextPromptPrompt,
+  cursorModelId,
   pastSessionBlock,
   pastSessionsBrief,
   pastSessionsSystem,
@@ -351,6 +352,7 @@ export class ChatService {
     this.pendingNotes.delete(id);
     this.ctx.db.delete(conversations).where(eq(conversations.id, id)).run();
     rmSync(path.join(this.ctx.paths.uploads, id), { recursive: true, force: true });
+    rmSync(path.join(this.ctx.paths.home, 'cursor-sessions', id), { recursive: true, force: true });
     this.ctx.bus.publish({ type: 'chat.updated', conversationId: id });
   }
 
@@ -789,6 +791,15 @@ export class ChatService {
       if (info.instructions) request.systemAppend = `${request.systemAppend}\n\n## The developer's instructions for you (${gateway.model})\nFollow these in every answer, together with the rules above:\n${info.instructions}`;
     }
 
+    // Cursor: its own CLI on your Cursor subscription, with a settings folder for this session alone
+    // (the commands you allowed here, Orbit's deny list, and its chats so it can continue them).
+    if (seat.runtime.id === 'cursor-cli') {
+      request.stateDir = path.join(this.ctx.paths.home, 'cursor-sessions', conv.id);
+      request.model = cursorModelId(seat.model);
+      const own = seat.model ? this.gatewayFor('cursor')?.info(seat.model).instructions : '';
+      if (own) request.systemAppend = `${request.systemAppend}\n\n## The developer's instructions for you (${request.model})\nFollow these in every answer, together with the rules above:\n${own}`;
+    }
+
     const runId = newId('run');
     this.ctx.db.update(conversationMessages).set({ runtime: seat.runtime.id, model: seat.model, kind: readOnlyEdit && !compacting ? 'plan' : 'chat' }).where(eq(conversationMessages.id, messageId)).run();
     const who = edit ? 'Agent' : conv.seat === 'security' ? 'Security reviewer' : 'Assistant';
@@ -923,6 +934,8 @@ export class ChatService {
       // Codex. A sleeping endpoint is not woken just for a suggestion.
       const gw = this.gatewayFor(conv.provider);
       const viaOpenRouter = gw ? await gw.seat(conv.model, { wake: false }) : null;
+      // Cursor's CLI takes too long to start for a one-line guess, and no other AI may stand in.
+      if (viaOpenRouter && !viaOpenRouter.gateway) return;
       const plan = viaOpenRouter ? null : await planSeat(this.ctx, 'prompter');
       const seat = viaOpenRouter ? viaOpenRouter.candidate : [plan?.primary, plan?.fallback].find((s) => s?.availability.available && s.runtime.kind === 'ai');
       if (!seat || !cwd) return;
@@ -938,12 +951,12 @@ export class ChatService {
           timeoutMs: 60_000,
           maxBudgetUsd: null,
           // The smallest, fastest model is plenty for one line.
-          model: viaOpenRouter ? viaOpenRouter.gateway.model : seat.provider === 'claude' ? 'haiku' : seat.model,
+          model: viaOpenRouter?.gateway ? viaOpenRouter.gateway.model : seat.provider === 'claude' ? 'haiku' : seat.model,
           effort: viaOpenRouter ? null : 'low',
           outputSchema: null,
           execution: { mode: 'trusted-local', allowNetworkTools: false },
           // One line of text needs no tools.
-          ...(viaOpenRouter ? { gateway: { ...viaOpenRouter.gateway, tools: false } } : {}),
+          ...(viaOpenRouter?.gateway ? { gateway: { ...viaOpenRouter.gateway, tools: false } } : {}),
         },
         { signal: AbortSignal.timeout(75_000), onEvent: () => undefined },
       );

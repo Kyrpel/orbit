@@ -14,10 +14,27 @@ export interface WorkspaceTab {
 /** `grid`: every open project side by side. `tabs`: one at a time, full size. */
 export type WorkspaceLayout = 'grid' | 'tabs';
 
+/** Side by side: how many columns. `auto` picks from the number of panes and the window width. */
+export type WorkspaceColumns = 'auto' | 2 | 3 | 4;
+export const WORKSPACE_COLUMNS: WorkspaceColumns[] = ['auto', 2, 3, 4];
+
 interface TabState {
   tabs: WorkspaceTab[];
   active: string | null;
   layout: WorkspaceLayout;
+  columns: WorkspaceColumns;
+}
+
+/**
+ * Columns for `n` panes in a container `width` pixels wide. A narrow window always gets one
+ * column, and there are never more columns than panes; otherwise your choice wins, and `auto`
+ * keeps two for 2 or 4 panes and uses three when 5 or more fit side by side.
+ */
+export function gridColumns(n: number, width: number, choice: WorkspaceColumns = 'auto'): number {
+  if (width < 760 || n <= 1) return 1;
+  if (choice !== 'auto') return Math.min(choice, n);
+  if (n === 2 || n === 4) return 2;
+  return width >= 1500 ? 3 : 2;
 }
 
 const STORAGE_KEY = 'orbit.workspace.tabs.v1';
@@ -26,14 +43,21 @@ const listeners = new Set<() => void>();
 function load(): TabState {
   try {
     const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? 'null') as TabState | null;
-    if (raw && Array.isArray(raw.tabs)) return { tabs: raw.tabs.filter((t) => t && typeof t.key === 'string' && typeof t.repoId === 'string'), active: raw.active ?? null, layout: raw.layout === 'tabs' ? 'tabs' : 'grid' };
+    if (raw && Array.isArray(raw.tabs)) {
+      return {
+        tabs: raw.tabs.filter((t) => t && typeof t.key === 'string' && typeof t.repoId === 'string'),
+        active: raw.active ?? null,
+        layout: raw.layout === 'tabs' ? 'tabs' : 'grid',
+        columns: WORKSPACE_COLUMNS.includes(raw.columns) ? raw.columns : 'auto',
+      };
+    }
   } catch {
     /* ignore a corrupt entry */
   }
-  return { tabs: [], active: null, layout: 'grid' };
+  return { tabs: [], active: null, layout: 'grid', columns: 'auto' };
 }
 
-let state: TabState = typeof localStorage === 'undefined' ? { tabs: [], active: null, layout: 'grid' } : load();
+let state: TabState = typeof localStorage === 'undefined' ? { tabs: [], active: null, layout: 'grid', columns: 'auto' } : load();
 
 function set(next: TabState) {
   state = next;
@@ -62,6 +86,10 @@ export const tabs = {
   get: () => state,
   setLayout(layout: WorkspaceLayout) {
     if (state.layout !== layout) set({ ...state, layout });
+  },
+  /** Columns side by side (and switches to side by side, where columns apply). */
+  setColumns(columns: WorkspaceColumns) {
+    if (state.columns !== columns || state.layout !== 'grid') set({ ...state, columns, layout: 'grid' });
   },
   activate(key: string) {
     if (state.tabs.some((t) => t.key === key)) set({ ...state, active: key });

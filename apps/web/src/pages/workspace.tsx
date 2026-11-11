@@ -6,7 +6,7 @@ import { TabView } from '../components/session';
 import { TerminalTabView } from '../components/terminal';
 import { Button, ErrorNote, Loading } from '../components/ui';
 import { useChats, useRepos } from '../lib/api';
-import { tabs, useTabs, type WorkspaceLayout, type WorkspaceTab } from '../lib/tabs';
+import { gridColumns, tabs, useTabs, WORKSPACE_COLUMNS, type WorkspaceColumns, type WorkspaceLayout, type WorkspaceTab } from '../lib/tabs';
 import { useTheme } from '../lib/theme';
 import { cn, timeAgo } from '../lib/utils';
 
@@ -151,7 +151,7 @@ function ProjectPicker({ repos, onPick, onClose }: { repos: RepoDTO[]; onPick: (
   );
 }
 
-function LayoutSwitch({ value }: { value: WorkspaceLayout }) {
+function LayoutSwitch({ value, columns }: { value: WorkspaceLayout; columns: WorkspaceColumns }) {
   const opt = (v: WorkspaceLayout, label: string, Icon: typeof Square, hint: string) => (
     <button
       type="button"
@@ -165,14 +165,39 @@ function LayoutSwitch({ value }: { value: WorkspaceLayout }) {
     </button>
   );
   return (
-    <div className="mb-1.5 ml-auto hidden shrink-0 items-center gap-0.5 rounded-[8px] bg-hull-3 p-0.5 lg:flex" role="group" aria-label="Layout">
-      {opt('grid', 'Side by side', LayoutGrid, 'See every open project at once')}
-      {opt('tabs', 'One at a time', Square, 'One project full size, switch with the tabs')}
+    <div className="mb-1.5 ml-auto hidden shrink-0 items-center gap-1.5 lg:flex">
+      {value === 'grid' ? <ColumnsSwitch value={columns} /> : null}
+      <div className="flex items-center gap-0.5 rounded-[8px] bg-hull-3 p-0.5" role="group" aria-label="Layout">
+        {opt('grid', 'Side by side', LayoutGrid, 'See every open project at once')}
+        {opt('tabs', 'One at a time', Square, 'One project full size, switch with the tabs')}
+      </div>
     </div>
   );
 }
 
-function TabStrip({ list, active, repos, sessions, onSelect, layout }: { list: WorkspaceTab[]; active: string | null; repos: RepoDTO[]; sessions: ConversationSummaryDTO[]; onSelect: (t: WorkspaceTab) => void; layout: WorkspaceLayout }) {
+/** Side by side: how many projects per row (3 shows six terminals as 3 × 2). */
+function ColumnsSwitch({ value }: { value: WorkspaceColumns }) {
+  return (
+    <div className="flex items-center gap-0.5 rounded-[8px] bg-hull-3 p-0.5" role="radiogroup" aria-label="Columns side by side">
+      <span className="px-1.5 text-2xs text-dust">Columns</span>
+      {WORKSPACE_COLUMNS.map((c) => (
+        <button
+          key={String(c)}
+          type="button"
+          role="radio"
+          aria-checked={value === c}
+          onClick={() => tabs.setColumns(c)}
+          title={c === 'auto' ? 'Orbit picks from how many projects are open and how wide the window is' : `${c} projects per row`}
+          className={cn('flex h-7 min-w-7 items-center justify-center rounded-[6px] px-2 text-xs tabular-nums transition-colors', value === c ? 'bg-hull font-[600] text-chalk shadow-[0_1px_2px_rgb(16_24_40/0.1)]' : 'text-dust hover:text-chalk')}
+        >
+          {c === 'auto' ? 'Auto' : c}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function TabStrip({ list, active, repos, sessions, onSelect, layout, columns }: { list: WorkspaceTab[]; active: string | null; repos: RepoDTO[]; sessions: ConversationSummaryDTO[]; onSelect: (t: WorkspaceTab) => void; layout: WorkspaceLayout; columns: WorkspaceColumns }) {
   const [picking, setPicking] = useState(false);
   const navigate = useNavigate();
   return (
@@ -232,17 +257,11 @@ function TabStrip({ list, active, repos, sessions, onSelect, layout }: { list: W
           />
         ) : null}
       </div>
-      <LayoutSwitch value={layout} />
+      <LayoutSwitch value={layout} columns={columns} />
     </div>
   );
 }
 
-/** Columns for n panes in a container this wide. */
-function gridColumns(n: number, width: number): number {
-  if (width < 760 || n <= 1) return 1;
-  if (n === 2 || n === 4) return 2;
-  return width >= 1500 ? 3 : 2;
-}
 
 function useSize<T extends HTMLElement>(): [React.RefObject<T | null>, { width: number; height: number }] {
   const ref = useRef<T>(null);
@@ -265,7 +284,7 @@ function useSize<T extends HTMLElement>(): [React.RefObject<T | null>, { width: 
 function PaneGrid({ list, active, repos, sessions, onFocus, onExpand }: { list: WorkspaceTab[]; active: string | null; repos: RepoDTO[]; sessions: ConversationSummaryDTO[]; onFocus: (t: WorkspaceTab) => void; onExpand: (t: WorkspaceTab) => void }) {
   const [box, size] = useSize<HTMLDivElement>();
   const term = useTheme() === 'terminal';
-  const cols = gridColumns(list.length, size.width);
+  const cols = gridColumns(list.length, size.width, useTabs().columns);
   const rows = Math.ceil(list.length / cols);
   // Fill the screen when the panes fit (each at least 380px tall); otherwise scroll.
   const fits = size.height / rows >= 380;
@@ -446,7 +465,7 @@ export function WorkspacePage() {
     <div className="flex h-[calc(100vh-56px)] min-h-0">
       <ProjectRail repos={list} sessions={sessions} activeRepo={activeRepo?.id ?? null} onOpen={open} narrow={grid && state.tabs.length > 1} />
       <div className="flex min-w-0 flex-1 flex-col">
-        {state.tabs.length ? <TabStrip list={state.tabs} active={state.active} repos={list} sessions={sessions} onSelect={pick} layout={state.layout} /> : null}
+        {state.tabs.length ? <TabStrip list={state.tabs} active={state.active} repos={list} sessions={sessions} onSelect={pick} layout={state.layout} columns={state.columns} /> : null}
         {grid ? (
           <PaneGrid
             list={state.tabs}

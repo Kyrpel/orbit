@@ -149,8 +149,14 @@ export const HF_PREFIX = 'hf:';
 
 export const isHfModel = (model: string | null | undefined): model is string => !!model && model.startsWith(HF_PREFIX);
 
-/** Which AI a model belongs to: Claude's own, OpenRouter's (`openrouter:…`), a Hugging Face endpoint (`hf:…`), or Codex's (anything else). */
-export function modelProvider(model: string): 'claude' | 'codex' | 'openrouter' | 'huggingface' {
+/** A session model `cursor:<id>` runs on your Cursor subscription, through the Cursor CLI. */
+export const CURSOR_PREFIX = 'cursor:';
+
+export const isCursorModel = (model: string | null | undefined): model is string => !!model && model.startsWith(CURSOR_PREFIX);
+
+/** Which AI a model belongs to: Claude's own, OpenRouter's (`openrouter:…`), a Hugging Face endpoint (`hf:…`), Cursor's (`cursor:…`), or Codex's (anything else). */
+export function modelProvider(model: string): 'claude' | 'codex' | 'openrouter' | 'huggingface' | 'cursor' {
+  if (model.startsWith(CURSOR_PREFIX)) return 'cursor';
   return model.startsWith(OPENROUTER_PREFIX) ? 'openrouter' : model.startsWith(HF_PREFIX) ? 'huggingface' : model.startsWith('claude-') ? 'claude' : 'codex';
 }
 
@@ -190,6 +196,15 @@ export const DEFAULT_OPENROUTER_MODELS = ['deepseek/deepseek-v4.1-flash-1017', '
 /** Longest master prompt for one OpenRouter model or Hugging Face endpoint. */
 export const MAX_MODEL_INSTRUCTIONS = 40_000;
 
+/** The Cursor models first in the Model menu (only those your Cursor account offers show). */
+export const DEFAULT_CURSOR_MODELS = ['auto', 'composer-2.5', 'claude-opus-5-5-high', 'gpt-5.6-sol-high', 'cursor-grok-4.6-high'];
+
+/** Cursor: which of your account's models are in the Model menu, and your instructions for each. */
+const CursorSettings = z.object({
+  models: z.array(z.string().trim().regex(/^[A-Za-z0-9][\w.\-[\]=,]*$/)).max(40).default(DEFAULT_CURSOR_MODELS),
+  instructions: z.record(z.string(), z.string().max(MAX_MODEL_INSTRUCTIONS)).default({}),
+});
+
 /** Your Hugging Face endpoints: only your instructions per endpoint live here (the token is a secret). */
 const HuggingFaceSettings = z.object({
   instructions: z.record(z.string(), z.string().max(MAX_MODEL_INSTRUCTIONS)).default({}),
@@ -216,6 +231,7 @@ export const SettingsSchema = z.object({
   github: GitHubSettings.prefault({}),
   openrouter: OpenRouterSettings.prefault({}),
   huggingface: HuggingFaceSettings.prefault({}),
+  cursor: CursorSettings.prefault({}),
   onboarding: OnboardingSettings.prefault({}),
 });
 
@@ -238,6 +254,7 @@ export const SettingsPatchSchema = z
     github: section,
     openrouter: section,
     huggingface: section,
+    cursor: section,
     onboarding: section,
   })
   .strict();
@@ -264,6 +281,7 @@ export function mergeSettings(current: Settings, patch: SettingsPatch): Settings
     github: { ...current.github, ...defined(patch.github) },
     openrouter: { ...current.openrouter, ...defined(patch.openrouter) },
     huggingface: { ...current.huggingface, ...defined(patch.huggingface) },
+    cursor: { ...current.cursor, ...defined(patch.cursor) },
     onboarding: { ...current.onboarding, ...defined(patch.onboarding) },
   });
 }

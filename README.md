@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>All your projects. One place. An AI team that works the way you do.</strong><br />
-  Open every project side by side and let Claude, Codex, OpenRouter models or your own model change them,<br />
+  Open every project side by side and let Claude, Codex, Cursor, OpenRouter models or your own model change them,<br />
   like a wall of Claude Code terminals, with a team of agents for planning, reviewing, security and better tasks when you want them.
 </p>
 
@@ -20,6 +20,10 @@
 ---
 
 ## What Orbit is
+
+[![Watch Orbit working across projects](docs/assets/orbit-demo-preview.jpg)](docs/assets/orbit-demo-2x.mp4)
+
+[Watch the workspace demo — 26 seconds at 2× speed](docs/assets/orbit-demo-2x.mp4).
 
 Orbit is a local app for solo and indie developers who work on several projects at once. You open one dashboard and:
 
@@ -36,7 +40,7 @@ Everything runs on your machine with your own logins and keys. There is no hoste
 
 ## The workspace
 
-The workspace is the home screen. Open your projects and they sit **side by side**, each in its own pane, so you watch them all at once instead of switching between terminals. A pane waiting for you gets an amber edge. **One at a time** shows a single project full size.
+The workspace is the home screen. Open your projects and they sit **side by side**, each in its own pane, so you watch them all at once instead of switching between terminals. Choose Auto, 2, 3 or 4 columns; narrow windows adapt to one column. A pane waiting for you gets an amber edge. **One at a time** shows a single project full size.
 
 There are two looks, switched in the top bar:
 
@@ -50,7 +54,7 @@ There are two looks, switched in the top bar:
 | **Paste images and long text** | Ctrl+V a screenshot (or drop an image) and it becomes `[Image #1]`; Claude or Codex sees it. Long pastes fold to `[Pasted text #1 +42 lines]` and the full text is sent. |
 | **Watch it work** | Every step with its result: the command output, `Read 120 lines`, or an edit's changed lines. |
 | **Choose how commands run** | Shift+Tab cycles **Ask first** (you approve each new command), **Auto-accept** (commands run on their own; a safety check still blocks risky ones), **Plan** (the agent researches and proposes a plan, changes nothing until you approve) and **Read-only**. |
-| **Pick the AI, model and effort** | Auto, Claude, Codex, OpenRouter or Hugging Face, any of their models, and effort from Low to Max, per pane. |
+| **Pick the AI, model and effort** | Auto, Claude, Codex, Cursor, OpenRouter or Hugging Face, with each provider's models and supported effort choices, per pane. |
 | **Point at files and run commands yourself** | `@` completes the project's files and folders. `!npm test` runs a command in the project right away; the agent hears about it with your next message. |
 | **Rewind and compact** | `/rewind` goes back to before one of your messages and restores the files, the conversation or both. `/compact` has the agent summarize the session and continue from the summary with a fresh context. |
 | **Use slash commands** | `/model`, `/effort`, `/ai`, `/mode`, `/plan`, `/resume`, `/past`, `/clear`, `/compact`, `/rewind`, `/context`, `/cost`, `/init`, `/changes`, `/commit`, `/security`, `/skills`, `/improve`, `/help`. Type `/` to see them, `?` for shortcuts. |
@@ -81,6 +85,8 @@ Session agents finish the job themselves: they build, test and check their own w
 On **Auto**, the reviewers use a different AI from the one that wrote the code, so every change gets a second opinion. If an AI is not ready or hits its usage limit, Orbit hands the step to the other one and says so.
 
 ## Other AIs: OpenRouter and your own models
+
+**Cursor** runs through its own CLI and your Cursor subscription. Install the [Cursor CLI](https://cursor.com/docs/cli/installation), run `cursor-agent login`, then refresh the Cursor card on **Agents**. Choose which account models appear in Orbit and add instructions for each. Pick Cursor in a session's AI menu. Orbit keeps each session's settings and chat separate, preserves your deny rules, and ignores project permission overrides. Cursor is available for local sessions; it does not provide Orbit's verified OS sandbox for Autopilot.
 
 Besides Claude and Codex, a session can use two more AIs. Pick them next to Auto, Claude and Codex in a session (or with `/ai`), then the model with `/model`. Both run inside Claude Code's tools with their own key: your Claude login is never used, and nothing in an OpenRouter or Hugging Face session falls back to Claude or Codex (not the answers, not the next-message suggestions, not `/improve`).
 

@@ -99,10 +99,12 @@ export function improvedText(r: TaskImprovementDTO): string {
   return parts.filter(Boolean).join('\n\n');
 }
 
-export type SessionAi = 'claude' | 'codex' | 'openrouter' | 'huggingface';
+export type SessionAi = 'claude' | 'codex' | 'openrouter' | 'huggingface' | 'cursor';
 
 /** OpenRouter is ready to pick (an Orbit server from before OpenRouter support sends nothing). */
 export const openRouterReady = (team: TeamDTO | undefined) => !!team?.openrouter?.connected;
+/** Cursor is ready to pick: the Cursor CLI is installed and signed in. */
+export const cursorReady = (team: TeamDTO | undefined) => !!team?.cursor?.ready;
 /** Hugging Face is ready to pick: connected, with at least one endpoint Orbit can run sessions on. */
 export const huggingFaceReady = (team: TeamDTO | undefined) => !!team?.huggingface?.connected && !!team.huggingface.endpoints?.some((e) => e.usable);
 
@@ -110,6 +112,7 @@ const HF_STATE: Record<string, string> = { running: 'awake', scaledToZero: 'asle
 
 /** The models each AI offers, and only its own: Claude's, Codex's, or the OpenRouter models you added. */
 export function modelChoices(team: TeamDTO | undefined, ai: SessionAi): { id: string; label: string; hint?: string }[] {
+  if (ai === 'cursor') return (team?.cursor?.models ?? []).filter((m) => !m.missing).map((m) => ({ id: m.id, label: m.label, hint: m.slug }));
   if (ai === 'huggingface') {
     return (team?.huggingface?.endpoints ?? [])
       .filter((e) => e.usable)
@@ -130,9 +133,9 @@ export function useAiChoices(provider: Provider) {
   const providers = team.data?.providers ?? [];
   const models = modelChoices(team.data, ai);
   // OpenRouter's default is the first model you added there.
-  const fallback = (ai === 'openrouter' || ai === 'huggingface' ? models[0]?.id : ai === 'codex' ? seat?.codexModel : seat?.model) ?? null;
+  const fallback = (ai === 'openrouter' || ai === 'huggingface' || ai === 'cursor' ? models[0]?.id : ai === 'codex' ? seat?.codexModel : seat?.model) ?? null;
   const name = (m: string | null | undefined) => (m ? (models.find((x) => x.id === m)?.label ?? modelLabel(m) ?? m).replace(/^Claude /, '') : null);
-  return { ai, providers, models, fallback, name, effortDefault: seat?.effort ?? null, autoAi: seat?.resolved.provider === 'codex' ? 'Codex' : 'Claude', openrouter: team.data?.openrouter ?? null, huggingface: team.data?.huggingface ?? null };
+  return { ai, providers, models, fallback, name, effortDefault: seat?.effort ?? null, autoAi: seat?.resolved.provider === 'codex' ? 'Codex' : 'Claude', openrouter: team.data?.openrouter ?? null, huggingface: team.data?.huggingface ?? null, cursor: team.data?.cursor ?? null };
 }
 
 /** Arrow keys, Enter, Esc and 1–9 on a numbered menu. */
@@ -240,7 +243,7 @@ export function usePrompt(o: PromptOptions) {
   const [dragging, setDragging] = useState(false);
   const counter = useRef({ image: 0, paste: 0 });
   // In an OpenRouter session, Improve runs on its OpenRouter model too, never on Claude or Codex.
-  const improve = useAction((text: string) => post<TaskImprovementDTO>('/api/prompts/improve', { text, repoId: o.repo.id, ...(o.provider === 'openrouter' || o.provider === 'huggingface' ? { gateway: { provider: o.provider, model: o.model } } : {}) }), {});
+  const improve = useAction((text: string) => post<TaskImprovementDTO>('/api/prompts/improve', { text, repoId: o.repo.id, ...(o.provider === 'openrouter' || o.provider === 'huggingface' || o.provider === 'cursor' ? { gateway: { provider: o.provider, model: o.model } } : {}) }), {});
   // /past and /resume: your Claude Code and Codex sessions from outside Orbit.
   const [pastQuery, setPastQuery] = useState('');
   const pastSearch = o.menu === 'past' ? pastQuery : '';
@@ -392,7 +395,7 @@ export function usePrompt(o: PromptOptions) {
       name: 'ai',
       hint: 'Use Claude, Codex or Auto',
       run: (a) => {
-        const p = (['auto', 'claude', 'codex', 'openrouter', 'huggingface'] as const).find((x) => x === a.toLowerCase().replace(/[\s-]/g, ''));
+        const p = (['auto', 'claude', 'codex', 'openrouter', 'huggingface', 'cursor'] as const).find((x) => x === a.toLowerCase().replace(/[\s-]/g, ''));
         if (p) o.onProvider(p);
         else o.setMenu('ai');
       },
@@ -619,7 +622,7 @@ export function usePrompt(o: PromptOptions) {
           key: 'model',
           tone: 'menu',
           title: 'Select model',
-          body: o.running ? 'Applies to the next run. The current run and messages sent into it keep the original model.' : `For this session only. ${choices.ai === 'openrouter' ? 'The default is the first model in your OpenRouter list' : choices.ai === 'huggingface' ? 'The default is your first Hugging Face endpoint' : "The default is the session agent's model"} (Agents page).`,
+          body: o.running ? 'Applies to the next run. The current run and messages sent into it keep the original model.' : `For this session only. ${choices.ai === 'openrouter' ? 'The default is the first model in your OpenRouter list' : choices.ai === 'huggingface' ? 'The default is your first Hugging Face endpoint' : choices.ai === 'cursor' ? 'The default is the first model in your Cursor list' : "The default is the session agent's model"} (Agents page).`,
           options: [
             { label: `Default (${choices.name(choices.fallback) ?? 'agent setting'})`, current: !o.model, run: () => (o.onModel(null), closeMenu()) },
             ...choices.models.map((m) => ({ label: m.label.replace(/^Claude /, ''), hint: m.hint ?? m.id, current: o.model === m.id, run: () => (o.onModel(m.id), closeMenu()) })),
@@ -658,6 +661,9 @@ export function usePrompt(o: PromptOptions) {
             choices.huggingface?.connected && choices.huggingface.endpoints?.some((e) => e.usable)
               ? { label: 'Hugging Face', hint: 'your own model on a rented GPU (Inference Endpoints)', current: o.provider === 'huggingface', run: () => (o.onProvider('huggingface'), closeMenu()) }
               : { label: 'Hugging Face', hint: 'create an endpoint on the Agents page first', current: false, run: () => (closeMenu(), navigate('/agents')) },
+            choices.cursor?.ready
+              ? { label: 'Cursor', hint: 'your Cursor subscription (Claude, GPT, Grok, Composer…)', current: o.provider === 'cursor', run: () => (o.onProvider('cursor'), closeMenu()) }
+              : { label: 'Cursor', hint: choices.cursor?.installed ? 'not signed in: type ! cursor-agent login' : 'install the Cursor CLI first (Agents page)', current: false, run: () => (closeMenu(), navigate('/agents')) },
           ],
           onCancel: closeMenu,
         };
@@ -902,7 +908,7 @@ export function usePrompt(o: PromptOptions) {
     ghost,
     openMenu: o.setMenu,
     status: {
-      aiText: `${choices.ai === 'codex' ? 'Codex' : choices.ai === 'openrouter' ? 'OpenRouter' : choices.ai === 'huggingface' ? 'Hugging Face' : 'Claude'}${o.provider === 'auto' ? ' (auto)' : ''}`,
+      aiText: `${choices.ai === 'codex' ? 'Codex' : choices.ai === 'openrouter' ? 'OpenRouter' : choices.ai === 'huggingface' ? 'Hugging Face' : choices.ai === 'cursor' ? 'Cursor' : 'Claude'}${o.provider === 'auto' ? ' (auto)' : ''}`,
       modelText: choices.name(o.model) ?? choices.name(choices.fallback) ?? 'default model',
       effortText: `${effortNow ? EFFORT_INFO[effortNow].label.toLowerCase() : 'default'} effort`,
     },

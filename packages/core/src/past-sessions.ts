@@ -81,7 +81,8 @@ interface Entry {
   mdMtimeMs: number | null;
 }
 
-const MANIFEST_VERSION = 2;
+// 3: titles and first requests are scrubbed for secrets too (they go into INDEX.md, the picker and prompts).
+const MANIFEST_VERSION = 3;
 const MAX_TURN_TEXT = 6000;
 const MAX_ACTIONS = 25;
 const MAX_FILES = 5000;
@@ -300,11 +301,11 @@ export class PastSessions {
       size: st.size,
       source,
       id,
-      title: p?.title ?? id,
+      title: redactSecrets(p?.title ?? id),
       // A slash command (/model, /effort) says little about what the session was for.
       firstMessage: (() => {
         const t = yours.find((x) => !x.text.startsWith('/')) ?? yours[0];
-        return t ? oneLine(t.text, 160) : null;
+        return t ? oneLine(redactSecrets(t.text), 160) : null;
       })(),
       cwd: p?.cwd ?? null,
       startedAt: p?.startedAt ?? null,

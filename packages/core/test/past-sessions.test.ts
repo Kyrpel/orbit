@@ -116,6 +116,19 @@ describe('past sessions: reading your Claude Code and Codex history', () => {
     expect(idx).toContain('Codex');
   });
 
+  it('scrubs secrets from titles and first requests too: the index, the picker and prompts never show them', async () => {
+    const { claude, library, past } = setup();
+    const key = 'sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789';
+    claudeSession(claude, 'C--k', '77777777-0000-4000-8000-000000000007', { cwd: path.join(root, 'k'), title: `Rotate ${key}`, first: `use this key ${key} for the deploy` });
+    await past.sync(true);
+    const [s] = past.list();
+    expect(s?.title).not.toContain(key);
+    expect(s?.firstMessage).not.toContain(key);
+    expect(s?.firstMessage).toContain('[REDACTED ANTHROPIC KEY]');
+    expect(readFileSync(path.join(library, 'INDEX.md'), 'utf8')).not.toContain(key);
+    expect(readFileSync(path.join(library, 'manifest.json'), 'utf8')).not.toContain(key);
+  });
+
   it("leaves out Orbit's own runs, scripts, worktrees and sessions without a word from you", async () => {
     const { claude, codex, past } = setup(['cccc3333-0000-4000-8000-000000000003']);
     const proj = path.join(root, 'shop');

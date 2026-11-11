@@ -78,7 +78,7 @@ const schemas = {
     images: z.array(z.object({ name: z.string().max(200), mediaType: z.enum(CHAT_IMAGE_TYPES), data: z.string().min(1).max(7_200_000) })).max(6).optional(),
     repoIds: z.array(z.string()).max(50).optional(),
     mode: z.enum(['edit', 'ask']).optional(),
-    provider: z.enum(['auto', 'claude', 'codex', 'openrouter', 'huggingface']).optional(),
+    provider: z.enum(['auto', 'claude', 'codex', 'openrouter', 'huggingface', 'cursor']).optional(),
     permissionMode: z.enum(['ask', 'auto', 'plan']).optional(),
     /** While the agent is busy: interrupt it and send this right away (otherwise it is queued). */
     now: z.boolean().optional(),
@@ -86,7 +86,7 @@ const schemas = {
     effort: z.enum(EFFORT_LEVELS).nullish(),
   }),
   patchChat: z.object({
-    provider: z.enum(['auto', 'claude', 'codex', 'openrouter', 'huggingface']).optional(),
+    provider: z.enum(['auto', 'claude', 'codex', 'openrouter', 'huggingface', 'cursor']).optional(),
     mode: z.enum(['edit', 'ask']).optional(),
     title: z.string().max(200).optional(),
     permissionMode: z.enum(['ask', 'auto', 'plan']).optional(),
@@ -104,7 +104,7 @@ const schemas = {
   commit: z.object({ message: z.string().min(1).max(5000) }),
   applyTask: z.object({ title: z.string().min(1).max(500), description: z.string().max(60_000) }),
   // `openrouter`: the session uses OpenRouter, so its model (null: the first one) does the rewrite.
-  improveText: z.object({ text: z.string().min(1).max(20_000), repoId: z.string().nullish(), gateway: z.object({ provider: z.enum(['openrouter', 'huggingface']), model: z.string().max(300).nullable() }).nullish() }),
+  improveText: z.object({ text: z.string().min(1).max(20_000), repoId: z.string().nullish(), gateway: z.object({ provider: z.enum(['openrouter', 'huggingface', 'cursor']), model: z.string().max(300).nullable() }).nullish() }),
 };
 
 function body<T extends z.ZodType>(schema: T, req: FastifyRequest): z.infer<T> {
@@ -149,7 +149,10 @@ export async function buildApp(orbit: Orbit, opts: AppOptions): Promise<FastifyI
       return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'Cross-origin requests are not allowed.' } });
     }
     const url = req.url.split('?')[0] ?? '';
-    if (url.startsWith('/api/') && url !== '/api/health') {
+    // Fastify decodes static route segments (for example /%61pi/session). Gate the
+    // matched route as well as the raw URL so encoded API paths cannot skip auth.
+    const route = req.routeOptions.url;
+    if ((route?.startsWith('/api/') || url.startsWith('/api/')) && route !== '/api/health') {
       const bearer = /^Bearer\s+(.+)$/i.exec(String(req.headers.authorization ?? ''))?.[1];
       const cookie = parseCookies(req.headers.cookie)[SESSION_COOKIE];
       if (!tokensMatch(opts.token, bearer) && !tokensMatch(opts.token, cookie)) {
@@ -183,7 +186,7 @@ export async function buildApp(orbit: Orbit, opts: AppOptions): Promise<FastifyI
   app.get('/auth', async (req, reply) => {
     const q = req.query as { token?: string; next?: string };
     if (!tokensMatch(opts.token, q.token)) return reply.code(401).type('text/html').send('<p>That sign-in link is not valid. Run <code>orbit open</code> for a fresh one.</p>');
-    const next = typeof q.next === 'string' && q.next.startsWith('/') && !q.next.startsWith('//') ? q.next : '/';
+    const next = typeof q.next === 'string' && q.next.startsWith('/') && !q.next.startsWith('//') && !/[\\\x00-\x1f\x7f]/.test(q.next) ? q.next : '/';
     reply.header('Set-Cookie', `${SESSION_COOKIE}=${encodeURIComponent(opts.token)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${60 * 60 * 24 * 30}`);
     return reply.redirect(next);
   });
@@ -255,6 +258,14 @@ export async function buildApp(orbit: Orbit, opts: AppOptions): Promise<FastifyI
     return orbit.openrouter.setInstructions(b.model, b.instructions);
   });
   app.post('/api/openrouter/models/remove', async (req) => orbit.openrouter.removeModel(body(z.object({ model: z.string().min(3).max(300) }), req).model));
+  // Cursor: your Cursor subscription through the Cursor CLI (its own login; Orbit never sees it).
+  app.get('/api/cursor', async (req) => orbit.cursor.status((req.query as { fresh?: string }).fresh === '1'));
+  app.post('/api/cursor/models', async (req) => orbit.cursor.addModel(body(z.object({ model: z.string().min(1).max(120) }), req).model));
+  app.post('/api/cursor/models/remove', async (req) => orbit.cursor.removeModel(body(z.object({ model: z.string().min(1).max(120) }), req).model));
+  app.post('/api/cursor/models/instructions', async (req) => {
+    const b = body(z.object({ model: z.string().min(1).max(120), instructions: z.string().max(60_000) }), req);
+    return orbit.cursor.setInstructions(b.model, b.instructions);
+  });
   // Hugging Face: your own models on rented GPUs. The token goes in, never comes back out.
   app.get('/api/huggingface', async () => orbit.huggingface.status());
   app.post('/api/huggingface/token', async (req) => orbit.huggingface.connect(body(z.object({ token: z.string().min(1).max(400) }), req).token));

@@ -9,6 +9,7 @@ export * from './notifier';
 export * from './openrouter';
 export * from './gateways';
 export * from './huggingface';
+export * from './cursor';
 export * from './orbit';
 export * from './outbox';
 export * from './overview';

@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { ClaudeAgentSdkRuntime, ClaudeCodeCliRuntime, CodexCliRuntime, ScriptedRuntime, type AgentRuntime } from '@orbit/agents';
+import { ClaudeAgentSdkRuntime, ClaudeCodeCliRuntime, CodexCliRuntime, CursorCliRuntime, ScriptedRuntime, type AgentRuntime } from '@orbit/agents';
 import { and, eq, inArray, isNotNull, agentRuns, conversations, missionRepos, missions, openDatabase, verifications, type DatabaseHandle } from '@orbit/database';
 import { defaultRunner, Git, GhCliClient, type CommandRunner, type GitHubClient } from '@orbit/git';
 import { AsanaProvider } from '@orbit/integrations-asana';
@@ -16,6 +16,7 @@ import { Notifier } from './notifier';
 import { Outbox } from './outbox';
 import { OverviewService } from './overview';
 import { ensureOrbitHome, orbitPaths, resolveOrbitHome } from './paths';
+import { CursorService } from './cursor';
 import { HuggingFaceService } from './huggingface';
 import { OpenRouterService } from './openrouter';
 import { PastSessions, pastSessionsDirs } from './past-sessions';
@@ -74,6 +75,8 @@ export class Orbit {
   readonly openrouter: OpenRouterService;
   /** Your own models on rented GPUs (Hugging Face Inference Endpoints). */
   readonly huggingface: HuggingFaceService;
+  /** Your Cursor subscription, through the Cursor CLI. */
+  readonly cursor: CursorService;
   readonly worker: Worker;
   private readonly handle: DatabaseHandle;
   private running = false;
@@ -92,6 +95,7 @@ export class Orbit {
       new ClaudeAgentSdkRuntime(env),
       new ClaudeCodeCliRuntime(env.ORBIT_CLAUDE_BIN || 'claude', env),
       new CodexCliRuntime(env.ORBIT_CODEX_BIN || 'codex', env),
+      new CursorCliRuntime(env.ORBIT_CURSOR_BIN || null, env),
       new ScriptedRuntime(),
     ]) {
       runtimes.set(rt.id, rt);
@@ -137,8 +141,9 @@ export class Orbit {
     );
     this.openrouter = new OpenRouterService(this.ctx);
     this.huggingface = new HuggingFaceService(this.ctx);
-    this.chat = new ChatService(this.ctx, this.repos, this.past, [this.openrouter, this.huggingface]);
-    this.prompter = new PromptEngineer(this.ctx, this.integrations, this.repos, [this.openrouter, this.huggingface]);
+    this.cursor = new CursorService(this.ctx, (this.ctx.runtimes.get('cursor-cli') as CursorCliRuntime | undefined) ?? null);
+    this.chat = new ChatService(this.ctx, this.repos, this.past, [this.openrouter, this.huggingface, this.cursor]);
+    this.prompter = new PromptEngineer(this.ctx, this.integrations, this.repos, [this.openrouter, this.huggingface, this.cursor]);
     this.skills = new SkillsService(this.ctx);
     this.worker = new Worker(
       this.queue,
@@ -233,8 +238,8 @@ export class Orbit {
 
   /** The AI team: which providers are connected and where worktrees live. */
   async team(): Promise<TeamDTO> {
-    const [team, openrouter, huggingface] = await Promise.all([teamStatus(this.ctx), this.openrouter.status(), this.huggingface.status()]);
-    return { ...team, openrouter, huggingface };
+    const [team, openrouter, huggingface, cursor] = await Promise.all([teamStatus(this.ctx), this.openrouter.status(), this.huggingface.status(), this.cursor.status()]);
+    return { ...team, openrouter, huggingface, cursor };
   }
 
   /** Uncommitted changes in a project (the workspace's Changes panel). */

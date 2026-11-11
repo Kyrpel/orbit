@@ -101,4 +101,26 @@ describe('llama.cpp gateway compatibility', () => {
     expect(res.status).toBe(502);
     expect(await res.text()).toContain('Model request stopped.');
   });
+
+  it('keeps any gateway key out of Claude Code: OpenRouter goes through it too, unchanged', async () => {
+    let seen: { auth?: string; body?: unknown } = {};
+    const upstream = await endpoint(async (req, res) => {
+      let raw = ''; for await (const chunk of req) raw += chunk;
+      seen = { auth: req.headers.authorization, body: JSON.parse(raw) };
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"type":"message","content":[]}');
+    });
+    // No llama.cpp compatibility: an OpenRouter-style upstream.
+    const proxy = await startLlamaGateway({ name: 'OpenRouter', baseUrl: upstream, token: 'sk-or-real-key', model: 'deepseek/x', tools: true }, new AbortController().signal);
+    cleanup.push(() => proxy.close());
+    // Claude Code only ever gets the loopback address and a throwaway token.
+    expect(proxy.gateway.token).not.toBe('sk-or-real-key');
+    expect(proxy.gateway.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+    const body = { system: 'rules', messages: [{ role: 'user', content: 'hi' }, { role: 'system', content: 'left as sent' }] };
+    const res = await fetch(`${proxy.gateway.baseUrl}/v1/messages`, { method: 'POST', headers: { authorization: `Bearer ${proxy.gateway.token}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    expect(res.status).toBe(200);
+    // The real key is added only on the way out, and the request is not rewritten.
+    expect(seen.auth).toBe('Bearer sk-or-real-key');
+    expect(seen.body).toEqual(body);
+  });
 });

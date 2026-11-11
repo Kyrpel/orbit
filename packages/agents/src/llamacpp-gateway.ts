@@ -22,7 +22,11 @@ export function normalizeLlamaSystem(body: Record<string, unknown>): Record<stri
   };
 }
 
-/** A per-run, authenticated loopback adapter with one fixed upstream endpoint. */
+/**
+ * A per-run, authenticated loopback adapter with one fixed upstream endpoint. Every gateway run
+ * (OpenRouter, Hugging Face) uses it, so Claude Code only ever holds this run's throwaway token,
+ * never the real key; llama.cpp upstreams also get their system turns normalized.
+ */
 export async function startLlamaGateway(upstream: AgentGateway, signal: AbortSignal): Promise<{ gateway: AgentGateway; close(): Promise<void> }> {
   signal.throwIfAborted();
   const token = randomBytes(32).toString('base64url');
@@ -68,7 +72,8 @@ export async function startLlamaGateway(upstream: AgentGateway, signal: AbortSig
       const response = await fetch(`${upstream.baseUrl.replace(/\/+$/, '')}${route}`, {
         method: 'POST',
         headers,
-        body: JSON.stringify(normalizeLlamaSystem(body)),
+        // Only strict llama.cpp chat templates need the system turns moved; others get the request as sent.
+        body: JSON.stringify(upstream.compatibility === 'llamacpp' ? normalizeLlamaSystem(body) : body),
         signal: AbortSignal.any([lifetime.signal, disconnected.signal]),
         // Do not forward this endpoint's credential to a redirected destination.
         redirect: 'error',

@@ -12,7 +12,7 @@ import { ChangesPanel } from './changes-panel';
 import { KIND_ICON, Plan, since, useTick } from './live-steps';
 import { Markdown } from './markdown';
 import { PastText } from './past-chip';
-import { huggingFaceReady, modelChoices, modePatch, openRouterReady, promptMode, type SessionAi, SHORTCUTS, takeDraft, useMenuKeys, usePrompt, useRepoActions, type MenuKind, type PromptMenu, type PromptMode, type PromptOptions } from './prompt';
+import { cursorReady, huggingFaceReady, modelChoices, modePatch, openRouterReady, promptMode, type SessionAi, SHORTCUTS, takeDraft, useMenuKeys, usePrompt, useRepoActions, type MenuKind, type PromptMenu, type PromptMode, type PromptOptions } from './prompt';
 import { NewMissionDialog } from './new-mission';
 import { modelLabel, PROVIDER_NAME, PROVIDER_TEXT, providerOfRuntime } from './provider';
 import { Button, ErrorNote, Loading } from './ui';
@@ -34,6 +34,8 @@ export function ProviderSwitch({ value, onChange, disabled }: { value: Provider;
     ...(openRouterReady(team.data) || value === 'openrouter' ? [{ value: 'openrouter' as const, label: 'OpenRouter' }] : []),
     // Hugging Face shows once you have an endpoint (Agents page).
     ...(huggingFaceReady(team.data) || value === 'huggingface' ? [{ value: 'huggingface' as const, label: 'Hugging Face' }] : []),
+    // Cursor shows once its CLI is installed and signed in.
+    ...(cursorReady(team.data) || value === 'cursor' ? [{ value: 'cursor' as const, label: 'Cursor' }] : []),
   ];
   return (
     <div className="inline-flex items-center gap-1.5">
@@ -134,7 +136,7 @@ export function ModelPicker({ provider, value, onChange }: { provider: Provider;
   const seat = agents.data?.find((a) => a.role === 'assistant');
   const ai: SessionAi = provider === 'auto' ? (seat?.resolved.provider === 'codex' ? 'codex' : 'claude') : provider;
   const list = modelChoices(team.data, ai);
-  const fallback = ai === 'openrouter' || ai === 'huggingface' ? list[0]?.id : ai === 'codex' ? seat?.codexModel : seat?.model;
+  const fallback = ai === 'openrouter' || ai === 'huggingface' || ai === 'cursor' ? list[0]?.id : ai === 'codex' ? seat?.codexModel : seat?.model;
   const fits = (m: string | null | undefined) => !!m && modelProvider(m) === ai;
   const current = fits(value) ? value! : '';
   const name = (m: string | null | undefined) => (m ? (list.find((x) => x.id === m)?.label ?? modelLabel(m) ?? m).replace(/^Claude /, '') : null);
@@ -148,7 +150,7 @@ export function ModelPicker({ provider, value, onChange }: { provider: Provider;
         title="Applies to this session only. Change the default on the Agents page (Session agent)."
         className="h-8 max-w-[180px] rounded-[8px] border border-seam bg-hull px-2 text-xs text-chalk"
       >
-        <option value="">Default ({name(fallback) ?? (ai === 'codex' ? 'Codex setting' : ai === 'openrouter' ? 'add a model on the Agents page' : ai === 'huggingface' ? 'create an endpoint on the Agents page' : 'agent setting')})</option>
+        <option value="">Default ({name(fallback) ?? (ai === 'codex' ? 'Codex setting' : ai === 'openrouter' ? 'add a model on the Agents page' : ai === 'huggingface' ? 'create an endpoint on the Agents page' : ai === 'cursor' ? 'pick models on the Agents page' : 'agent setting')})</option>
         {list.map((m) => (
           <option key={m.id} value={m.id}>
             {m.label.replace(/^Claude /, '')}
@@ -871,7 +873,7 @@ function Header({
       {!security ? <ProviderSwitch value={provider} onChange={onProvider} /> : null}
       {!security && onModel ? <ModelPicker provider={provider} value={model ?? null} onChange={onModel} /> : null}
       {/* Effort is Claude's and Codex's own thinking setting; OpenRouter models do not take it. */}
-      {!security && onEffort && provider !== 'openrouter' && provider !== 'huggingface' ? <EffortPicker value={effort ?? null} onChange={onEffort} /> : null}
+      {!security && onEffort && provider !== 'openrouter' && provider !== 'huggingface' && provider !== 'cursor' ? <EffortPicker value={effort ?? null} onChange={onEffort} /> : null}
     </>
   );
   if (compact) {

@@ -60,6 +60,11 @@ export interface AgentRunRequest {
    * that cannot use tools: the agent then has none and can only answer. Claude Code CLI only.
    */
   gateway?: AgentGateway | null;
+  /**
+   * A folder that belongs to this session, where a runtime may keep its own state between
+   * messages (Cursor: its settings with this session's allow list, and its chats).
+   */
+  stateDir?: string | null;
 }
 
 export interface AgentGateway {

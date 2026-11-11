@@ -26,9 +26,14 @@
     "@types/node": "^22.20.5",
     "tsx": "^4.23.15",
     "typescript": "~5.9.3",
-    "vitest": "^3.2.7"
+    "vite": "^6.4.5",
+    "vitest": "^4.1.12"
   },
   "pnpm": {
+    "overrides": {
+      "tsup>esbuild": "^0.28.2",
+      "@fastify/static>content-disposition": "^2.0.1"
+    },
     "onlyBuiltDependencies": [
       "better-sqlite3",
       "esbuild"

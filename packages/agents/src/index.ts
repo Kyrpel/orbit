@@ -11,3 +11,4 @@ export * from './scripted';
 export * from './claude-stream';
 export * from './codex-cli';
 export * from './codex-app-server';
+export * from './cursor-cli';

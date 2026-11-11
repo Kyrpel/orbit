@@ -2,6 +2,7 @@ import { AlertTriangle, ArrowRight, Check, ClipboardList, Hammer, MessageCircle,
 import { useState } from 'react';
 import { Link } from 'react-router';
 import { EFFORT_INFO, EFFORT_LEVELS, formatDuration, formatUsd, type AgentRoleDTO, type EffortLevel, type ProviderStatusDTO, type Settings, type TeamDTO, type TeamSeat } from '@orbit/shared';
+import { CursorCard } from '../components/cursor-card';
 import { HuggingFaceCard } from '../components/hf-card';
 import { OpenRouterCard } from '../components/openrouter-card';
 import { PROVIDER_NAME, PROVIDER_TEXT, ProviderBadge } from '../components/provider';
@@ -114,6 +115,7 @@ function TeamPanel({ team, seats, securityOn }: { team: TeamDTO; seats: AgentRol
         ))}
         {team.openrouter ? <OpenRouterCard status={team.openrouter} /> : null}
         {team.huggingface ? <HuggingFaceCard status={team.huggingface} /> : null}
+        {team.cursor ? <CursorCard status={team.cursor} /> : null}
       </div>
       <div className="flex items-start justify-between gap-6 border-t border-seam px-5 py-4">
         <div>

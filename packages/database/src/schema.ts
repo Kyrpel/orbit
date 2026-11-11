@@ -386,7 +386,7 @@ export const conversations = sqliteTable(
     /** Empty means every connected project. */
     repoIds: text('repo_ids', { mode: 'json' }).$type<string[]>().notNull().default(sql`'[]'`),
     mode: text('mode').$type<'edit' | 'ask'>().notNull().default('ask'),
-    provider: text('provider').$type<'auto' | 'claude' | 'codex' | 'openrouter' | 'huggingface'>().notNull().default('auto'),
+    provider: text('provider').$type<'auto' | 'claude' | 'codex' | 'openrouter' | 'huggingface' | 'cursor'>().notNull().default('auto'),
     agentSessionId: text('agent_session_id'),
     agentRuntime: text('agent_runtime'),
     allowedCommands: text('allowed_commands', { mode: 'json' }).$type<string[]>().notNull().default(sql`'[]'`),

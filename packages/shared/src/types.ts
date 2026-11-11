@@ -16,8 +16,8 @@ export type AgentRole = 'planner' | 'engineer' | 'reviewer' | 'security';
 export type TeamSeat = AgentRole | 'prompter' | 'assistant';
 export const TEAM_SEATS: readonly TeamSeat[] = ['planner', 'engineer', 'reviewer', 'security', 'prompter', 'assistant'];
 /** The AI behind a runtime. */
-export type AiProvider = 'claude' | 'codex' | 'scripted';
-export type RuntimeId = 'claude-agent-sdk' | 'claude-code-cli' | 'codex-cli' | 'scripted';
+export type AiProvider = 'claude' | 'codex' | 'cursor' | 'scripted';
+export type RuntimeId = 'claude-agent-sdk' | 'claude-code-cli' | 'codex-cli' | 'cursor-cli' | 'scripted';
 export type ExecutionMode = 'sandbox' | 'trusted-local';
 
 /** A verification or setup command configured for a repository. Executed without a shell. */
@@ -619,8 +619,37 @@ export interface HuggingFaceStatusDTO {
   error: string | null;
 }
 
+/** A Cursor model in the Model menu. */
+export interface CursorModelDTO {
+  /** `cursor:<id>`: what a session's model setting holds. */
+  id: string;
+  /** Cursor's id, like `claude-opus-5-5-high`. */
+  slug: string;
+  label: string;
+  /** Your Cursor account does not offer it (any more). */
+  missing: boolean;
+  /** Your master prompt for it. */
+  instructions: string;
+}
+
+export interface CursorStatusDTO {
+  /** The Cursor CLI (cursor-agent) is on this computer. */
+  installed: boolean;
+  /** Signed in with your Cursor account. */
+  ready: boolean;
+  /** What to do when it is not ready. */
+  reason: string | null;
+  version: string | null;
+  /** The models you picked for the Model menu. */
+  models: CursorModelDTO[];
+  /** Every model your Cursor account offers, to add from. */
+  catalog: { id: string; label: string }[];
+}
+
 export interface TeamDTO {
   providers: ProviderStatusDTO[];
+  /** Your Cursor subscription, through the Cursor CLI. */
+  cursor: CursorStatusDTO;
   /** Models on OpenRouter that Claude sessions can use instead of Claude's own. */
   openrouter: OpenRouterStatusDTO;
   /** Your own models on rented GPUs (Hugging Face Inference Endpoints). */
@@ -832,8 +861,8 @@ export interface ChatEventDTO {
 }
 
 /** Which AI a session uses. OpenRouter runs its models (DeepSeek, Hermes…) inside Claude Code, with your OpenRouter key. */
-export type SessionProvider = 'auto' | 'claude' | 'codex' | 'openrouter' | 'huggingface';
-export const SESSION_PROVIDERS = ['auto', 'claude', 'codex', 'openrouter', 'huggingface'] as const;
+export type SessionProvider = 'auto' | 'claude' | 'codex' | 'openrouter' | 'huggingface' | 'cursor';
+export const SESSION_PROVIDERS = ['auto', 'claude', 'codex', 'openrouter', 'huggingface', 'cursor'] as const;
 
 export interface ConversationSummaryDTO {
   id: string;

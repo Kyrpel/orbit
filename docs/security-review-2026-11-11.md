@@ -1,0 +1,16 @@
+# Security review — 11 November 2026
+
+Reviewed the repository using [Sentry's security-review skill](https://github.com/getsentry/skills/tree/main/skills/security-review): API authentication and origin checks, agent permissions and environments, gateway credentials, file access, Git/command execution, Asana trigger authorization, database queries, frontend rendering, dependencies, and CI configuration. Findings below distinguish reproduced behavior from dependency advisories and hardening.
+
+## Fixed findings
+
+- **High: encoded API paths bypassed authentication.** The hook checked the raw `/api/` prefix, while Fastify decoded route segments. An unauthenticated request to `/%61pi/missions` reached the protected handler. The gate now checks the matched route as well as the raw URL. Regression tests cover encoded reads, a denied write, and authenticated access. The default localhost binding and Host/Origin checks constrain exposure but do not replace authentication.
+- **Cursor permission restrictions were weakened.** Session settings discarded the user's deny list and inherited web allowances even with network tools disabled. The runtime now preserves denies and explicitly denies web fetching when disabled. Project CLI configuration is ignored so repository files cannot override session permissions. Runs requesting OS isolation fail before spawning; one-shot runs also receive isolated settings.
+- **Sign-in redirect hardening.** Backslashes and control characters could make a nominally relative redirect resolve off-site in a browser. They are now rejected. This path requires a valid sign-in token; no unauthenticated exploit was established.
+- **Published dependency advisories.** Updated `@fastify/static` in both server and packaged CLI, Vitest and its dependencies, and the esbuild used by tsup. The original production audit listed six advisories; the broader audit also identified development-tool advisories. Orbit did not enable the directory listing or protected-static-file configurations implicated in several static-serving advisories. These were dependency exposures, not separately reproduced application exploits. The final audit reports zero known vulnerabilities across 555 dependencies. The static plugin retains CommonJS `content-disposition` 2.0.1 for Node 22.11 compatibility; Vitest uses the existing Vite 6 line.
+
+## Verification and limits
+
+Regression coverage includes API auth, origin/Host protections, redirects, Cursor deny rules and sandbox refusal, gateway token isolation, secret rejection before publishing, and unverified trigger approval. Live Cursor tests through Orbit's runtime successfully read a random fixture and executed a single allowlisted command, returning its generated nonce.
+
+The review is source analysis and targeted testing, not a guarantee that every vulnerability has been found. Trusted-local sessions execute on the developer's machine; permission rules are not an OS sandbox. External AI services, installed plugins, the developer's repositories and credentials, and production cloud infrastructure are outside this repository audit. Pattern-based secret scanning cannot establish that arbitrary strings or every frame of a recording contain no sensitive information.

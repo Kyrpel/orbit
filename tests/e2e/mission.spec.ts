@@ -4,9 +4,9 @@ const TOKEN = 'e2e-token-0123456789abcdefghijklmnopqrstuvwxyz';
 
 test('run with Orbit: task to reviewed, committed change through the dashboard', async ({ page }) => {
   await page.goto(`/auth?token=${TOKEN}`);
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  await page.getByRole('link', { name: 'Autopilot', exact: true }).click();
 
-  await page.getByRole('button', { name: 'New mission' }).click();
+  await page.getByRole('button', { name: 'New task' }).click();
   await page.getByLabel('What should change?').fill('Document the cart total helper');
   await page.getByLabel('Details and acceptance criteria').fill('Explain what total() returns.');
   await page.getByRole('button', { name: 'Start mission' }).click();

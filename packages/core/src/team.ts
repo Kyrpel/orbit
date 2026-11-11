@@ -33,11 +33,11 @@ export interface SeatPlan {
   why: string;
 }
 
-export const PROVIDER_LABEL: Record<AiProvider, string> = { claude: 'Claude', codex: 'Codex', scripted: 'Scripted demo' };
+export const PROVIDER_LABEL: Record<AiProvider, string> = { claude: 'Claude', codex: 'Codex', cursor: 'Cursor', scripted: 'Scripted demo' };
 
 export function providerOf(runtime: Pick<AgentRuntime, 'id' | 'kind'>): AiProvider {
   if (runtime.kind === 'scripted') return 'scripted';
-  return runtime.id === 'codex-cli' ? 'codex' : 'claude';
+  return runtime.id === 'codex-cli' ? 'codex' : runtime.id === 'cursor-cli' ? 'cursor' : 'claude';
 }
 
 const codexCache = new WeakMap<OrbitContext, { at: number; value: RuntimeAvailability }>();
@@ -169,7 +169,7 @@ export function worktreeRoot(ctx: OrbitContext): string {
   return ctx.settings.get().execution.worktreeRoot || ctx.paths.worktrees;
 }
 
-export async function teamStatus(ctx: OrbitContext): Promise<Omit<TeamDTO, 'openrouter' | 'huggingface'>> {
+export async function teamStatus(ctx: OrbitContext): Promise<Omit<TeamDTO, 'openrouter' | 'huggingface' | 'cursor'>> {
   const settings = ctx.settings.get();
   const p = await providers(ctx);
   const list: ProviderStatusDTO[] = [];

@@ -72,6 +72,16 @@ describe('local API security', () => {
     expect((await request(port, { path: '/api/missions', headers: auth })).status).toBe(200);
   });
 
+  it('requires authentication after the router decodes an API path', async () => {
+    for (const url of ['/%61pi/missions', '/a%70i/session', '/%61%70%69/chats']) {
+      expect((await request(port, { path: url })).status).toBe(401);
+      expect((await request(port, { path: url, headers: auth })).status).toBe(200);
+    }
+    const write = await request(port, { method: 'POST', path: '/%61pi/consent', body: { grant: true } });
+    expect(write.status).toBe(401);
+    expect(orbit.ctx.settings.get().execution.localExecutionConsentAt).toBeNull();
+  });
+
   it('rejects foreign Host headers (DNS rebinding)', async () => {
     const res = await request(port, { path: '/api/missions', headers: { ...auth, host: 'evil.example.com' } });
     expect(res.status).toBe(403);
@@ -96,8 +106,10 @@ describe('local API security', () => {
   });
 
   it('never redirects off-site after sign-in', async () => {
-    const res = await request(port, { path: `/auth?token=${TOKEN}&next=//evil.example.com` });
-    expect(res.headers.location).toBe('/');
+    for (const next of ['//evil.example.com', '/\\evil.example.com', '/\t/evil.example.com']) {
+      const res = await request(port, { path: `/auth?token=${TOKEN}&next=${encodeURIComponent(next)}` });
+      expect(res.headers.location).toBe('/');
+    }
   });
 
   it('returns structured validation errors', async () => {

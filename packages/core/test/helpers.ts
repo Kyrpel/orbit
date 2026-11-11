@@ -102,7 +102,7 @@ export function makeOrbit(root: string, opts: Partial<CreateOrbitOptions> & { ru
     ...opts,
   });
   // Tests register one runtime; the Claude-connection setting only accepts Claude runtimes or `scripted`.
-  const runtimeId = (opts.runtime ?? new ScriptedRuntime()).id as Exclude<RuntimeId, 'codex-cli'>;
+  const runtimeId = (opts.runtime ?? new ScriptedRuntime()).id as Exclude<RuntimeId, 'codex-cli' | 'cursor-cli'>;
   orbit.ctx.settings.update({ execution: { runtime: runtimeId, localExecutionConsentAt: new Date().toISOString(), maxFixIterations: 1 } });
   return {
     orbit,
