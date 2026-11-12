@@ -17,6 +17,8 @@ All notable changes to Orbit are documented here. The format follows [Keep a Cha
 
 ### Added
 
+- A looping GIF of the workspace demo, embedded directly in the README.
+
 - Cursor CLI sessions using your Cursor subscription, account models, and per-model instructions.
 - Auto, 2, 3 and 4-column workspace layouts and a 2× workspace video in the README.
 

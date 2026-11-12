@@ -21,9 +21,9 @@
 
 ## What Orbit is
 
-[![Watch Orbit working across projects](docs/assets/orbit-demo-preview.jpg)](docs/assets/orbit-demo-2x.mp4)
+![Orbit working across projects — looping demo at 2× speed](docs/assets/orbit-demo.gif)
 
-[Watch the workspace demo — 26 seconds at 2× speed](docs/assets/orbit-demo-2x.mp4).
+[Watch the full-resolution video — 26 seconds at 2× speed](docs/assets/orbit-demo-2x.mp4).
 
 Orbit is a local app for solo and indie developers who work on several projects at once. You open one dashboard and:
 
