@@ -149,3 +149,21 @@ describe('OpenRouter model ids', () => {
     expect(SettingsSchema.parse({}).openrouter.models).toEqual(['deepseek/deepseek-v4.1-flash-1017', 'nousresearch/hermes-4-405b']);
   });
 });
+
+describe('effort per AI', () => {
+  it('offers only the levels each AI takes', async () => {
+    const { effortLevelsFor, codexEffort, cursorModelEffort } = await import('../src');
+    expect(effortLevelsFor('claude')).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+    expect(effortLevelsFor('auto')).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+    expect(effortLevelsFor('codex')).toEqual(['low', 'medium', 'high', 'xhigh']);
+    expect(effortLevelsFor('cursor')).toBeNull();
+    expect(effortLevelsFor('openrouter')).toBeNull();
+    expect(effortLevelsFor('huggingface')).toBeNull();
+    expect(codexEffort('max')).toBe('xhigh');
+    expect(codexEffort('high')).toBe('high');
+    expect(cursorModelEffort('cursor:claude-opus-5-5-high')).toBe('high');
+    expect(cursorModelEffort('gpt-5.3-codex-xhigh-fast')).toBe('xhigh');
+    expect(cursorModelEffort('cursor:auto')).toBeNull();
+    expect(cursorModelEffort('composer-2.5')).toBeNull();
+  });
+});

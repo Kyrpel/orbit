@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { and, eq, inArray, notInArray, missionRepos, missions, projectRepos, repos, type RepoRow } from '@orbit/database';
@@ -174,6 +174,20 @@ export class RepoService {
     return this.toDTO(row);
   }
 
+  /** The folder now has git with a commit: record it as a git project (its branch from .git/HEAD). */
+  private promoteToGit(row: RepoRow): RepoRow {
+    try {
+      const head = readFileSync(path.join(row.localPath, '.git', 'HEAD'), 'utf8').trim();
+      const branch = /^ref: refs\/heads\/(.+)$/.exec(head)?.[1];
+      if (!branch || !existsSync(path.join(row.localPath, '.git', 'refs', 'heads', ...branch.split('/'))) && !existsSync(path.join(row.localPath, '.git', 'packed-refs'))) return row;
+      const next = this.ctx.db.update(repos).set({ isGit: true, defaultBranch: branch, updatedAt: nowIso(this.ctx) }).where(eq(repos.id, row.id)).returning().get();
+      audit(this.ctx, { actor: 'user', action: 'repo.git_detected', target: row.id, summary: `${row.name} is a git project now (branch ${branch})` });
+      return next ?? row;
+    } catch {
+      return row;
+    }
+  }
+
   private async registerFolder(folder: string, opts: { name?: string; actor?: string }): Promise<RepoDTO> {
     const existing = this.ctx.db.select().from(repos).all().find((r) => samePath(r.localPath, folder));
     if (existing) throw new OrbitError('CONFLICT', `${existing.name} is already connected.`, { details: { repoId: existing.id } });
@@ -211,7 +225,9 @@ export class RepoService {
   }
 
   update(id: string, patch: RepoPatch, actor = 'user'): RepoDTO {
-    const row = this.getRow(id);
+    let row = this.getRow(id);
+    // A plain folder that has since become a git project (git init, a first commit): use it as one.
+    if (!row.isGit && patch.allowModify) row = this.promoteToGit(row);
     if (!row.isGit && patch.allowModify) {
       throw new OrbitError('VALIDATION', `${row.name} is a folder without git, so Orbit can only read it.`, {
         hint: 'To let missions change it, run `git init` there, make a first commit, then reconnect it.',

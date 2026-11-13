@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { execa } from 'execa';
-import { redactSecrets, type AgentPlanItem } from '@orbit/shared';
+import { codexEffort, redactSecrets, type AgentPlanItem } from '@orbit/shared';
 import { runCodexAppServer } from './codex-app-server';
 import { buildAgentEnv } from './env';
 import { outputPreview } from './output';
@@ -239,7 +239,7 @@ export class CodexCliRuntime implements AgentRuntime {
     if (req.access === 'workspace-write' && req.execution.allowNetworkTools) args.push('-c', 'sandbox_workspace_write.network_access=true');
     args.push(...codexWebArgs(req.execution.allowNetworkTools));
     if (req.model) args.push('-m', req.model);
-    if (req.effort) args.push('-c', `model_reasoning_effort="${req.effort}"`);
+    if (req.effort) args.push('-c', `model_reasoning_effort="${codexEffort(req.effort)}"`);
     if (schemaFile && !resumeId) args.push('--output-schema', schemaFile);
     if (!resumeId) for (const img of req.images ?? []) args.push('-i', img.path);
     args.push('-');

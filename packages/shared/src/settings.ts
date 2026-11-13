@@ -94,6 +94,26 @@ const TeamSettings = z.object({
 export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 export type EffortLevel = (typeof EFFORT_LEVELS)[number];
 
+/**
+ * The effort levels each AI really takes. Claude Code: low to max. Codex: low to Extra high (it has
+ * no "max"). Cursor puts effort in the model itself (claude-opus-5-5-high, gpt-5.3-codex-xhigh…),
+ * and OpenRouter and Hugging Face models take none: null means there is no effort to set.
+ */
+export function effortLevelsFor(ai: string): readonly EffortLevel[] | null {
+  if (ai === 'codex') return ['low', 'medium', 'high', 'xhigh'];
+  if (ai === 'cursor' || ai === 'openrouter' || ai === 'huggingface') return null;
+  return EFFORT_LEVELS;
+}
+
+/** Codex has no "max": its strongest level is Extra high. */
+export const codexEffort = (e: EffortLevel | null | undefined): EffortLevel | null => (e === 'max' ? 'xhigh' : (e ?? null));
+
+/** The effort a Cursor model's id carries (`claude-opus-5-5-high-fast` → high), if any. */
+export function cursorModelEffort(model: string | null | undefined): EffortLevel | null {
+  const m = /-(low|medium|high|xhigh|max)(?:-fast)?$/.exec(model ?? '');
+  return (m?.[1] as EffortLevel | undefined) ?? null;
+}
+
 export const EFFORT_INFO: Readonly<Record<EffortLevel, { label: string; description: string }>> = {
   low: { label: 'Low', description: 'Fastest and cheapest. Simple, well-specified work.' },
   medium: { label: 'Medium', description: 'Balanced. Opus 5.5 uses this when nothing is set.' },

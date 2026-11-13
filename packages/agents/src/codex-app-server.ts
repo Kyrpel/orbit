@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { execa } from 'execa';
-import { redactSecrets, type AgentPlanItem, type StepOutput } from '@orbit/shared';
+import { codexEffort, redactSecrets, type AgentPlanItem, type StepOutput } from '@orbit/shared';
 import { emptyResult, isUsageLimitError, type AgentEvent, type AgentImage, type AgentRunContext, type AgentRunRequest, type AgentRunResult, type AgentRunStatus } from './runtime';
 import { codexWebArgs, codexWebStep, shellName, unwrapShellCommand, type CodexWebAction } from './codex-cli';
 import { addedFile, outputPreview, unifiedDiff } from './output';
@@ -301,7 +301,7 @@ export async function runCodexAppServer(opts: { bin: string; env: Record<string,
       : await call('thread/start', { ...threadParams, ephemeral: !req.session?.persist });
     threadId = String(((thread.thread ?? {}) as Json).id ?? resumeId ?? '');
     ctx.onEvent({ type: 'status', message: `Session ${resumeId ? 'continued' : 'started'}${req.model ? ` (${req.model})` : ' (Codex default model)'}` });
-    await call('turn/start', { threadId, input: codexInput(req.prompt, req.images), ...(req.effort ? { effort: req.effort } : {}) });
+    await call('turn/start', { threadId, input: codexInput(req.prompt, req.images), ...(req.effort ? { effort: codexEffort(req.effort) } : {}) });
     await done;
   } catch (err) {
     turnError = turnError ?? (err as Error).message;

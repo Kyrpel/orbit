@@ -5,6 +5,9 @@ import {
   CHAT_IMAGE_LIMITS,
   EFFORT_INFO,
   EFFORT_LEVELS,
+  codexEffort,
+  cursorModelEffort,
+  effortLevelsFor,
   type ChatImageInput,
   type ChatMessageDTO,
   type ConversationDetailDTO,
@@ -634,11 +637,17 @@ export function usePrompt(o: PromptOptions) {
           key: 'effort',
           tone: 'menu',
           title: 'Select effort',
-          body: `Higher effort thinks longer and uses more tokens.${o.running ? ' Applies to the next run; the current run keeps its effort.' : ''}`,
-          options: [
-            { label: `Default (${choices.effortDefault ? EFFORT_INFO[choices.effortDefault].label : 'agent setting'})`, current: !o.effort, run: () => (o.onEffort(null), closeMenu()) },
-            ...EFFORT_LEVELS.map((l) => ({ label: EFFORT_INFO[l].label, hint: EFFORT_INFO[l].description, current: o.effort === l, run: () => (o.onEffort(l), closeMenu()) })),
-          ],
+          body: !effortLevels
+            ? choices.ai === 'cursor'
+              ? 'Cursor sets effort through the model: pick a Low, High or Extra high variant with /model (for example claude-opus-5-5-high).'
+              : `${choices.ai === 'openrouter' ? 'OpenRouter' : 'Hugging Face'} models have no effort setting.`
+            : `Higher effort thinks longer and uses more tokens.${choices.ai === 'codex' ? ' Codex goes up to Extra high.' : ''}${o.running ? ' Applies to the next run; the current run keeps its effort.' : ''}`,
+          options: !effortLevels
+            ? [{ label: choices.ai === 'cursor' ? 'Choose a model' : 'Close', run: () => (choices.ai === 'cursor' ? o.setMenu('model') : closeMenu()) }]
+            : [
+                { label: `Default (${choices.effortDefault ? EFFORT_INFO[choices.effortDefault].label : 'agent setting'})`, current: !o.effort, run: () => (o.onEffort(null), closeMenu()) },
+                ...effortLevels.map((l) => ({ label: EFFORT_INFO[l].label, hint: EFFORT_INFO[l].description, current: o.effort === l, run: () => (o.onEffort(l), closeMenu()) })),
+              ],
           onCancel: closeMenu,
         };
       case 'ai': {
@@ -874,7 +883,9 @@ export function usePrompt(o: PromptOptions) {
       }
     : null;
 
-  const effortNow = o.effort ?? choices.effortDefault;
+  const effortLevels = effortLevelsFor(choices.ai);
+  const rawEffort = o.effort ?? choices.effortDefault;
+  const effortNow = choices.ai === 'codex' ? codexEffort(rawEffort) : rawEffort;
   return {
     ref,
     focus,
@@ -910,7 +921,12 @@ export function usePrompt(o: PromptOptions) {
     status: {
       aiText: `${choices.ai === 'codex' ? 'Codex' : choices.ai === 'openrouter' ? 'OpenRouter' : choices.ai === 'huggingface' ? 'Hugging Face' : choices.ai === 'cursor' ? 'Cursor' : 'Claude'}${o.provider === 'auto' ? ' (auto)' : ''}`,
       modelText: choices.name(o.model) ?? choices.name(choices.fallback) ?? 'default model',
-      effortText: `${effortNow ? EFFORT_INFO[effortNow].label.toLowerCase() : 'default'} effort`,
+      // Only what the AI really takes: Cursor's comes from its model, OpenRouter and Hugging Face have none.
+      effortText: !effortLevels
+        ? choices.ai === 'cursor' && cursorModelEffort(o.model ?? choices.fallback)
+          ? `${EFFORT_INFO[cursorModelEffort(o.model ?? choices.fallback)!].label.toLowerCase()} effort (model)`
+          : ''
+        : `${effortNow ? EFFORT_INFO[effortNow].label.toLowerCase() : 'default'} effort`,
     },
   };
 }

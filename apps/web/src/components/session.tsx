@@ -2,7 +2,7 @@ import { AlertTriangle, ArrowUp, Check, ChevronDown, Clock3, Copy, History, Load
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { useNavigate } from 'react-router';
 import type { ChatEventDTO, ChatImageInput, ChatMessageDTO, ConversationDetailDTO, ConversationSummaryDTO, RepoDTO, SessionApprovalDTO, SessionMode, SessionPermissionMode } from '@orbit/shared';
-import { EFFORT_INFO, EFFORT_LEVELS, formatDuration, modelProvider, type EffortLevel } from '@orbit/shared';
+import { EFFORT_INFO, EFFORT_LEVELS, effortLevelsFor, formatDuration, modelProvider, type EffortLevel } from '@orbit/shared';
 import { buildLiveModel, type LiveRun, type LiveStep } from '../lib/live-steps';
 import { del, keys, patch, post, useAction, useAgents, useChat, useChats, useSettings, useTeam } from '../lib/api';
 import { tabs, type WorkspaceTab } from '../lib/tabs';
@@ -163,7 +163,7 @@ export function ModelPicker({ provider, value, onChange }: { provider: Provider;
 }
 
 /** How hard this tab's agent thinks. "Default" is the session agent's effort (Agents page). */
-export function EffortPicker({ value, onChange }: { value: EffortLevel | null; onChange: (e: EffortLevel | null) => void }) {
+export function EffortPicker({ value, onChange, levels = EFFORT_LEVELS }: { value: EffortLevel | null; onChange: (e: EffortLevel | null) => void; levels?: readonly EffortLevel[] }) {
   const agents = useAgents();
   const fallback = agents.data?.find((a) => a.role === 'assistant')?.effort;
   return (
@@ -177,7 +177,7 @@ export function EffortPicker({ value, onChange }: { value: EffortLevel | null; o
         className="h-8 rounded-[8px] border border-seam bg-hull px-2 text-xs text-chalk"
       >
         <option value="">Default ({fallback ? EFFORT_INFO[fallback].label : 'agent setting'})</option>
-        {EFFORT_LEVELS.map((l) => (
+        {levels.map((l) => (
           <option key={l} value={l} title={EFFORT_INFO[l].description}>
             {EFFORT_INFO[l].label}
           </option>
@@ -873,7 +873,7 @@ function Header({
       {!security ? <ProviderSwitch value={provider} onChange={onProvider} /> : null}
       {!security && onModel ? <ModelPicker provider={provider} value={model ?? null} onChange={onModel} /> : null}
       {/* Effort is Claude's and Codex's own thinking setting; OpenRouter models do not take it. */}
-      {!security && onEffort && provider !== 'openrouter' && provider !== 'huggingface' && provider !== 'cursor' ? <EffortPicker value={effort ?? null} onChange={onEffort} /> : null}
+      {!security && onEffort && provider !== 'openrouter' && provider !== 'huggingface' && provider !== 'cursor' ? <EffortPicker value={effort ?? null} onChange={onEffort} levels={effortLevelsFor(provider) ?? EFFORT_LEVELS} /> : null}
     </>
   );
   if (compact) {
