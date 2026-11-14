@@ -8,6 +8,7 @@ import {
   NEXT_PROMPT_SYSTEM,
   nextPromptPrompt,
   cursorModelId,
+  handoffBrief,
   pastSessionBlock,
   pastSessionsBrief,
   pastSessionsSystem,
@@ -28,6 +29,7 @@ import {
   type ApprovalRequest,
   type SteerFn,
   type AssistantProject,
+  type HistoryItem,
 } from '@orbit/agents';
 import { asc, desc, eq, inArray, conversationEvents, conversationMessages, conversations, type ConversationMessageRow, type ConversationRow, type MessageUsage, type StoredAttachment } from '@orbit/database';
 import {
@@ -599,7 +601,8 @@ export class ChatService {
     const history = all
       .slice(compactAt + 1)
       .filter((m) => (m.status === 'done' || m.status === 'steered') && m.id !== messageId && !userIds.includes(m.id))
-      .map((m) => ({ role: m.role, content: m.content }));
+      // Each answer remembers which AI wrote it, so a different AI is never told they were its own.
+      .map((m): HistoryItem => (m.role === 'assistant' ? { role: m.role, content: m.content, who: aiOf(m.runtime, m.model) } : { role: m.role, content: m.content }));
     // Read-only conversations have no summary slot in their prompt: it leads their history instead.
     const summary = compactAt >= 0 ? (all[compactAt]?.content.trim() ?? '') : '';
     if (conv.mode === 'ask' && summary) history.unshift({ role: 'assistant', content: `[Summary of the earlier conversation] ${summary}` });
@@ -611,16 +614,19 @@ export class ChatService {
 
     // Before an agent that may change files starts, save them, so /rewind can bring them back.
     const repo = projects[0];
+    let checkpoint: string | null = null;
     if (conv.mode === 'edit' && conv.permissionMode !== 'plan' && !compacting && repo?.isGit && userIds[0] && !signal.aborted) {
       const saved = await takeCheckpoint(this.ctx.git, repo.localPath, checkpointRef(conversationId, userIds[0]));
       if (saved) this.ctx.db.update(conversationMessages).set({ checkpoint: saved }).where(eq(conversationMessages.id, userIds[0])).run();
+      checkpoint = saved;
     }
 
     const images = this.imagesFor(conversationId, userIds);
     let result = await this.turn(conv, messageId, withModel(plan.primary, conv.model, conv.effort), projects, told, history, signal, images, past);
     if (result.status === 'rate_limited' && plan.fallback) {
       this.event(conversationId, messageId, { kind: 'note', actor: 'system', title: `${plan.primary.label} hit its usage limit. Switching to ${plan.fallback.label}.`, detail: result.error, data: null });
-      result = await this.turn(this.row(conversationId), messageId, withModel(plan.fallback, conv.model, conv.effort), projects, told, history, signal, images, past);
+      // The next AI gets a handoff: what the first one ran and changed for this message, from the files saved before it started.
+      result = await this.turn(this.row(conversationId), messageId, withModel(plan.fallback, conv.model, conv.effort), projects, told, history, signal, images, past, { from: aiOf(plan.primary.runtime.id, plan.primary.model), reason: 'limit', checkpoint });
     }
 
     const blocked = this.blockedFrom(result, this.row(conversationId));
@@ -661,19 +667,24 @@ export class ChatService {
     seat: SeatCandidate,
     projects: RepoDTO[],
     message: string,
-    history: { role: 'user' | 'assistant'; content: string }[],
+    history: HistoryItem[],
     signal: AbortSignal,
     images: AgentImage[],
     past: PastContext | null,
+    handoff: Handoff | null = null,
   ): Promise<AgentRunResult> {
     // A gateway model keeps its own agent session: another model cannot continue one it did not write.
     const runtimeKey = seat.gateway ? `${seat.runtime.id}:${seat.model}` : seat.runtime.id;
     const resumeId = seat.runtime.resumable && conv.agentRuntime === runtimeKey ? conv.agentSessionId : null;
-    let result = await this.runOnce(conv, messageId, seat, projects, message, history, resumeId, signal, images, past);
+    // Another AI worked on this session before (a usage limit, or you switched): a handoff, not its history as ours.
+    const me = aiOf(seat.runtime.id, seat.model);
+    const from = handoff ?? (!resumeId && conv.agentRuntime && conv.agentRuntime !== runtimeKey ? { from: aiOfKey(conv.agentRuntime), reason: 'switch' as const, checkpoint: null } : null);
+    const brief = !resumeId && from && from.from !== me ? await this.handoffText(conv, messageId, from, projects[0] ?? null) : null;
+    let result = await this.runOnce(conv, messageId, seat, projects, message, history, resumeId, signal, images, past, brief);
     // A session can disappear (cleared by the CLI, another machine): start fresh with the history instead.
     if (resumeId && result.status === 'failed' && !result.numTurns && !signal.aborted) {
       this.event(conv.id, messageId, { kind: 'note', actor: 'system', title: 'Could not continue the previous session, so the agent starts a fresh one with the conversation so far.', detail: result.error, data: null });
-      result = await this.runOnce(conv, messageId, seat, projects, message, history, null, signal, images, past);
+      result = await this.runOnce(conv, messageId, seat, projects, message, history, null, signal, images, past, brief);
     }
     if (seat.runtime.resumable && result.sessionId) {
       this.ctx.db.update(conversations).set({ agentSessionId: result.sessionId, agentRuntime: runtimeKey }).where(eq(conversations.id, conv.id)).run();
@@ -687,13 +698,17 @@ export class ChatService {
     seat: SeatCandidate,
     projects: RepoDTO[],
     message: string,
-    history: { role: 'user' | 'assistant'; content: string }[],
+    allHistory: HistoryItem[],
     resumeId: string | null,
     signal: AbortSignal,
     images: AgentImage[],
     past: PastContext | null,
+    handoff: string | null = null,
   ): Promise<AgentRunResult> {
     const settings = this.ctx.settings.get();
+    // This agent's own earlier answers are "You"; others keep the name of the AI that wrote them.
+    const me = aiOf(seat.runtime.id, seat.model);
+    const history = allHistory.map((h) => (h.who === me ? { role: h.role, content: h.content } : h));
     const briefs: AssistantProject[] = projects.map((p) => ({
       name: p.name,
       path: p.localPath,
@@ -729,7 +744,7 @@ export class ChatService {
     const withPast = (system: string) => (past ? `${system}\n\n${past.system}` : system);
     const sessionBase = {
       ...base,
-      prompt: sessionPrompt({ message, project: briefs[0]!, history: intro ? history : [], summary: intro ? this.compactSummary(conv.id) : null, intro, ...(past?.brief ? { pastSessions: past.brief } : {}) }),
+      prompt: sessionPrompt({ message, project: briefs[0]!, history: intro ? history : [], summary: intro ? this.compactSummary(conv.id) : null, intro, ...(past?.brief ? { pastSessions: past.brief } : {}), ...(handoff && intro ? { handoff } : {}) }),
       readRoots: pastRoots,
     };
     const request: AgentRunRequest = readOnlyEdit
@@ -770,7 +785,7 @@ export class ChatService {
           }
         : {
           ...base,
-          prompt: intro ? assistantPrompt({ question: message, history, projects: briefs, ...(past?.brief ? { pastSessions: past.brief } : {}) }) : message,
+          prompt: intro ? assistantPrompt({ question: message, history, projects: briefs, ...(past?.brief ? { pastSessions: past.brief } : {}), ...(handoff ? { handoff } : {}) }) : message,
           systemAppend: withPast(projects.length === 1 ? `${SESSION_READONLY_SYSTEM}\n\n${ASSISTANT_SYSTEM}` : ASSISTANT_SYSTEM),
           readRoots: [...others.map((r) => r.localPath), ...pastRoots],
           access: 'read-only',
@@ -835,6 +850,42 @@ export class ChatService {
       data: { runId, phase: 'end', status, numTurns: result.numTurns },
     });
     return result;
+  }
+
+  /**
+   * What the next AI needs to pick up the work: the commands the previous one ran for this message
+   * (refused ones too) and what changed. After a usage limit, that is exactly what changed since
+   * the files were saved before the turn; after you switched, the project's uncommitted changes.
+   */
+  private async handoffText(conv: ConversationRow, messageId: string, h: Handoff, repo: RepoDTO | null): Promise<string> {
+    const events = this.ctx.db.select().from(conversationEvents).where(eq(conversationEvents.messageId, messageId)).orderBy(asc(conversationEvents.id)).all();
+    const commands = events
+      .filter((e) => (e.kind === 'tool' && (e.data as { step?: string } | null)?.step === 'run') || (e.kind === 'error' && e.title.startsWith('Needs your OK')))
+      .map((e) => (e.kind === 'error' ? `${e.title.replace(/^Needs your OK: /, '')} (refused: it needed the developer's OK)` : e.title))
+      .slice(-25);
+    let changes: { title: string; stat: string; diff: string } | null = null;
+    if (repo?.isGit && conv.mode === 'edit') {
+      try {
+        if (h.checkpoint) {
+          const now = await takeCheckpoint(this.ctx.git, repo.localPath, checkpointRef(conv.id, `${messageId}-handoff`));
+          if (now) {
+            changes = {
+              title: `What ${h.from} changed while working on this message`,
+              stat: (await this.ctx.git.run(repo.localPath, ['diff', '--stat', h.checkpoint, now])).trim(),
+              diff: await this.ctx.git.run(repo.localPath, ['diff', h.checkpoint, now]),
+            };
+          }
+        } else {
+          const c = await repoChanges(this.ctx, this.repos.getRow(repo.id));
+          if (c.files.length) changes = { title: 'Uncommitted changes in the project right now', stat: c.files.map((f) => f.path).join('\n'), diff: c.truncated ? `${c.diff}\n[…cut short]` : c.diff };
+        }
+      } catch {
+        /* no diff: the handoff still names the commands */
+      }
+    }
+    const files = changes?.stat ? Number(/(\d+) files? changed/.exec(changes.stat)?.[1] ?? changes.stat.split('\n').filter(Boolean).length) : 0;
+    this.event(conv.id, messageId, { kind: 'note', actor: 'system', title: `Handed over from ${h.from}: ${commands.length} ${commands.length === 1 ? 'command' : 'commands'} and ${files} changed ${files === 1 ? 'file' : 'files'} passed on`, data: null });
+    return handoffBrief({ from: h.from, reason: h.reason, commands, changes });
   }
 
   /**
@@ -1131,6 +1182,30 @@ export class ChatService {
 function identityNote(name: string, slug: string, servedBy: string): string {
   const shown = name.replace(/^[^:]+:\s*/, '');
   return `Who you are: you are ${shown} (${slug}), a model ${servedBy}. You work inside Orbit, which uses Claude Code's tools as your workbench, but you are not Claude, not Claude Code and not made by Anthropic, whatever earlier parts of this prompt say. If you are asked who or what you are, say that you are ${shown}.`;
+}
+
+/** A session moving to another AI: who had it, why, and the files saved before the interrupted turn. */
+interface Handoff {
+  from: string;
+  reason: 'limit' | 'switch';
+  checkpoint: string | null;
+}
+
+/** Which AI wrote an answer, from the runtime and model it ran on. */
+function aiOf(runtime: string | null | undefined, model: string | null | undefined): string {
+  if (runtime === 'shell') return 'Command output';
+  if (model && modelProvider(model) === 'openrouter') return 'OpenRouter';
+  if (model?.startsWith('hf:')) return 'Hugging Face';
+  if (runtime === 'codex-cli') return 'Codex';
+  if (runtime === 'cursor-cli') return 'Cursor';
+  if (runtime === 'scripted') return 'Scripted';
+  return 'Claude';
+}
+
+/** The same, from a session's stored agent key (`claude-code-cli:openrouter:…`, `codex-cli`…). */
+function aiOfKey(key: string): string {
+  const [runtime, ...rest] = key.split(':');
+  return aiOf(runtime, rest.length ? rest.join(':') : null);
 }
 
 /** For an OpenRouter model that cannot use tools: it should say so instead of pretending to look. */

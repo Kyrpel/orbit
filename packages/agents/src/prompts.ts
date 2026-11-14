@@ -427,6 +427,39 @@ Rules:
 
   Only use project names you were given. Omit the block when the developer is only asking a question.`;
 
+/** A turn of the conversation; `who` names the AI that wrote an answer when it was not the one reading it. */
+export interface HistoryItem {
+  role: 'user' | 'assistant';
+  content: string;
+  who?: string;
+}
+
+/**
+ * The handoff when a session moves from one AI to another (a usage limit, or you switched): who
+ * worked on it and why it stopped, the commands it ran for this message, and what it changed.
+ * The conversation itself follows, with the other AI's answers labelled as its own.
+ */
+export function handoffBrief(a: { from: string; reason: 'limit' | 'switch'; commands: string[]; changes: { title: string; stat: string; diff: string } | null }): string {
+  const why =
+    a.reason === 'limit'
+      ? `${a.from} was working on the developer's latest message and stopped because it hit its usage limit. You are taking over that same message.`
+      : `The developer switched this session from ${a.from} to you.`;
+  const commands = a.commands.length ? `\n### Commands ${a.from} ran for this message\n${block('untrusted_command_output', a.commands.map((c) => `- ${c}`).join('\n'))}\n` : '';
+  const MAX_DIFF = 20_000;
+  let changes = '';
+  if (a.changes) {
+    const files = a.changes.stat.trim();
+    const diff = a.changes.diff.trim();
+    changes = !files
+      ? `\n### ${a.changes.title}\nNo files changed.\n`
+      : `\n### ${a.changes.title}\n${block('untrusted_diff', `${files}${diff ? `\n\n${diff.length > MAX_DIFF ? '[The full diff is too large to include here: read the changed files.]' : diff}` : ''}`)}\n`;
+  }
+  return `## You are taking over from ${a.from}
+${why} Read its work below and check the files, then continue from where it stopped. Do not redo work that is already done, and do not undo it unless it is wrong. In the conversation, answers marked "${a.from}" were written by ${a.from}, not by you.
+${commands}${changes}
+`;
+}
+
 export interface AssistantProject {
   name: string;
   path: string;
@@ -436,7 +469,7 @@ export interface AssistantProject {
   topLevel: string[];
 }
 
-export function assistantPrompt(args: { question: string; projects: AssistantProject[]; history: { role: 'user' | 'assistant'; content: string }[]; pastSessions?: string }): string {
+export function assistantPrompt(args: { question: string; projects: AssistantProject[]; history: HistoryItem[]; pastSessions?: string; handoff?: string }): string {
   const projects = args.projects
     .map((p) =>
       [
@@ -458,12 +491,12 @@ export function assistantPrompt(args: { question: string; projects: AssistantPro
     const text = m.content.length > 4000 ? `${m.content.slice(0, 4000)}\n[…trimmed]` : m.content;
     if (text.length > budget) break;
     budget -= text.length;
-    kept.unshift(`${m.role === 'user' ? 'Developer' : 'Assistant'}: ${text}`);
+    kept.unshift(`${m.role === 'user' ? 'Developer' : (m.who ?? 'Assistant')}: ${text}`);
   }
   return `## The developer's projects (${args.projects.length})
 ${projects}
 
-${args.pastSessions ?? ''}${kept.length ? `## Conversation so far\n${block('untrusted_conversation', kept.join('\n\n'))}\n\n` : ''}## The developer asks
+${args.pastSessions ?? ''}${args.handoff ?? ''}${kept.length ? `## Conversation so far\n${block('untrusted_conversation', kept.join('\n\n'))}\n\n` : ''}## The developer asks
 ${block('untrusted_question', args.question)}
 
 Answer in Markdown.`;
@@ -586,7 +619,9 @@ export function sessionPrompt(args: {
   /** The developer's latest sessions in this folder outside Orbit (see `pastSessionsBrief`). */
   pastSessions?: string;
   /** Earlier turns, only when the agent's own session cannot be resumed. */
-  history?: { role: 'user' | 'assistant'; content: string }[];
+  history?: HistoryItem[];
+  /** Another AI worked on this session before (see `handoffBrief`). */
+  handoff?: string;
   /** The agent's own summary of an earlier part of the session (after /compact), ahead of the history. */
   summary?: string | null;
   /** True on the first message of a session (or when the session could not be resumed). */
@@ -609,12 +644,12 @@ export function sessionPrompt(args: {
     const text = m.content.length > 4000 ? `${m.content.slice(0, 4000)}\n[…trimmed]` : m.content;
     if (text.length > budget) break;
     budget -= text.length;
-    kept.unshift(`${m.role === 'user' ? 'Developer' : 'You'}: ${text}`);
+    kept.unshift(`${m.role === 'user' ? 'Developer' : (m.who ?? 'You')}: ${text}`);
   }
   const summary = args.summary?.trim() ? `## Summary of this session so far (you wrote it when the conversation was compacted)\n${block('untrusted_conversation', args.summary.trim().slice(0, 16_000))}\n\n` : '';
   return `${brief}
 
-${args.pastSessions ?? ''}${summary}${kept.length ? `## Earlier in this session\n${block('untrusted_conversation', kept.join('\n\n'))}\n\n` : ''}## The developer says
+${args.pastSessions ?? ''}${args.handoff ?? ''}${summary}${kept.length ? `## Earlier in this session\n${block('untrusted_conversation', kept.join('\n\n'))}\n\n` : ''}## The developer says
 ${args.message}`;
 }
 

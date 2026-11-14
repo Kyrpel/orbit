@@ -549,7 +549,10 @@ describe('working sessions (the workspace)', () => {
     orbit.chat.send(s.id, { message: 'Now refactor it', provider: 'codex' });
     await until(() => orbit.chat.detail(s.id).messages.length === 4 && !orbit.chat.isRunning(s.id));
     expect(codexCalls[0]?.session?.resumeId).toBeNull();
-    expect(codexCalls[0]?.prompt).toContain('You: answer from claude-code-cli');
+    // Claude's answer reaches Codex as Claude's, with a handoff, never as Codex's own ("You:").
+    expect(codexCalls[0]?.prompt).toContain('Claude: answer from claude-code-cli');
+    expect(codexCalls[0]?.prompt).not.toContain('You: answer from claude-code-cli');
+    expect(codexCalls[0]?.prompt).toContain('The developer switched this session from Claude to you.');
     expect(orbit.chat.detail(s.id)).toMatchObject({ provider: 'codex', agentRuntime: 'codex-cli' });
   });
 
