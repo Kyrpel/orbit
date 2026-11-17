@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { emptyResult, ScriptedRuntime, type AgentRunRequest, type AgentRunResult, type AgentRuntime, type ApprovalDecision, type AgentImage } from '@orbit/agents';
+import { emptyResult, ScriptedRuntime, type AgentRunContext, type AgentRunRequest, type AgentRunResult, type AgentRuntime, type ApprovalDecision, type AgentImage } from '@orbit/agents';
 import { createOrbit, MemorySecretStore, planSeat, silentLogger, type Orbit } from '../src';
 import { cleanup, makeOrbit, makeRepo, tempDir, USER, waitFor, type TestOrbit } from './helpers';
 
@@ -191,6 +191,7 @@ describe('Ask conversations', () => {
       },
     };
     await setup([slow]);
+    orbit.ctx.settings.update({ execution: { sessionFollowUps: 'queue' } });
     const c = orbit.chat.start({ message: 'One' });
     expect(() => orbit.chat.send(c.id, { message: '   ' })).toThrow();
     orbit.chat.send(c.id, { message: 'Two' });
@@ -246,24 +247,187 @@ describe('Ask conversations', () => {
     expect(after.messages.map((m) => m.status)).toEqual(['done', 'done', 'steered']);
   });
 
-  it('"send now" interrupts the current answer and sends the new message right away', async () => {
+  it.each([false, true])('continues the original request and additions together (explicit send now: %s)', async (now) => {
     const calls: AgentRunRequest[] = [];
+    let completeStep!: () => void;
+    let firstSignal!: AbortSignal;
     const slow: AgentRuntime = {
       ...fake('claude-code-cli'),
       run: (req, ctx) => {
         calls.push(req);
         if (calls.length > 1) return Promise.resolve(emptyResult({ status: 'succeeded', durationMs: 1, text: 'redirected', numTurns: 1 }));
-        return new Promise((resolve) => ctx.signal.addEventListener('abort', () => resolve(emptyResult({ status: 'cancelled', durationMs: 1, text: 'partial' }))));
+        firstSignal = ctx.signal;
+        ctx.onEvent({ type: 'tool', tool: 'Bash', id: 'build', summary: 'Build the original feature' });
+        completeStep = () => ctx.onEvent({ type: 'tool_result', id: 'build', isError: false, summary: 'Built the feature' });
+        return new Promise((resolve) => ctx.signal.addEventListener('abort', () => resolve(emptyResult({ status: 'cancelled', durationMs: 1, text: 'partial', sessionId: 'interrupted-session' }))));
       },
     };
     await setup([slow]);
+    // Ctrl+Enter must override a saved preference to wait; Enter uses the new default.
+    if (now) orbit.ctx.settings.update({ execution: { sessionFollowUps: 'queue' } });
     const c = orbit.chat.start({ message: 'Long task' });
     await until(() => calls.length === 1);
-    orbit.chat.send(c.id, { message: 'Actually, do this instead', now: true });
+    orbit.chat.send(c.id, { message: 'Also add tests', now });
+    orbit.chat.send(c.id, { message: 'Keep the existing changes', now });
+    expect(firstSignal.aborted).toBe(now);
+    if (!now) completeStep();
     await until(() => calls.length === 2 && !orbit.chat.isRunning(c.id));
     const d = orbit.chat.detail(c.id);
-    expect(d.messages.map((m) => m.status)).toEqual(['done', 'cancelled', 'done', 'done']);
+    expect(d.messages.map((m) => m.status)).toEqual(['done', 'cancelled', 'done', 'done', 'done']);
+    expect(calls[1]?.prompt).toContain('Original request\nLong task');
+    expect(calls[1]?.prompt).toContain('Additional instruction 1\nAlso add tests');
+    expect(calls[1]?.prompt).toContain('Additional instruction 2\nKeep the existing changes');
+    expect(calls[1]?.prompt).toContain('do not repeat completed actions');
+    expect(calls[1]?.session?.resumeId).toBe('interrupted-session');
     expect(d.messages.at(-1)?.content).toBe('redirected');
+  });
+
+  it('can opt into waiting even when the active agent accepts live input', async () => {
+    const calls: AgentRunRequest[] = [];
+    const received: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const live: AgentRuntime = {
+      ...fake('claude-code-cli'),
+      run: async (req, ctx) => {
+        calls.push(req);
+        ctx.onSteerReady?.((text) => (received.push(text), true));
+        await gate;
+        expect(ctx.signal.aborted).toBe(false);
+        ctx.onSteerReady?.(null);
+        return emptyResult({ status: 'succeeded', durationMs: 1, text: 'done', sessionId: 'live-session', numTurns: 1 });
+      },
+    };
+    await setup([live]);
+    const c = orbit.chat.start({ message: 'Long task' });
+    await until(() => orbit.chat.detail(c.id).steerable);
+    // Changing the setting also applies to an already running session.
+    orbit.ctx.settings.update({ execution: { sessionFollowUps: 'queue' } });
+    const queued = orbit.chat.send(c.id, { message: 'Do this afterwards' });
+    expect(queued.messages.at(-1)?.status).toBe('queued');
+    expect(received).toEqual([]);
+    expect(calls).toHaveLength(1);
+    release();
+    await until(() => calls.length === 2 && !orbit.chat.isRunning(c.id));
+    expect(calls[1]?.prompt).toBe('Do this afterwards');
+  });
+
+  it('keeps a second follow-up when a live run is already stopping', async () => {
+    const calls: AgentRunRequest[] = [];
+    const received: string[] = [];
+    const live: AgentRuntime = {
+      ...fake('claude-code-cli'),
+      run: async (req, ctx) => {
+        calls.push(req);
+        if (calls.length === 1) {
+          ctx.onSteerReady?.((text) => (received.push(text), true));
+          await new Promise<void>((resolve) => ctx.signal.addEventListener('abort', () => resolve(), { once: true }));
+          ctx.onSteerReady?.(null);
+          return emptyResult({ status: 'cancelled', durationMs: 1, sessionId: 'live-session' });
+        }
+        return emptyResult({ status: 'succeeded', durationMs: 1, text: 'continued', numTurns: 1 });
+      },
+    };
+    await setup([live]);
+    const c = orbit.chat.start({ message: 'Long task' });
+    await until(() => orbit.chat.detail(c.id).steerable);
+    orbit.chat.send(c.id, { message: 'Change direction', now: true });
+    orbit.chat.send(c.id, { message: 'And keep the tests' });
+    await until(() => calls.length === 2 && !orbit.chat.isRunning(c.id));
+    expect(received).toEqual([]);
+    expect(calls[1]?.prompt).toContain('Original request\nLong task');
+    expect(calls[1]?.prompt).toContain('Additional instruction 1\nChange direction');
+    expect(calls[1]?.prompt).toContain('Additional instruction 2\nAnd keep the tests');
+  });
+
+  it('delivers additions sent during startup as soon as live input opens', async () => {
+    const received: string[] = [];
+    let open!: () => void;
+    let finish!: () => void;
+    const starting = new Promise<void>((resolve) => (open = resolve));
+    const working = new Promise<void>((resolve) => (finish = resolve));
+    let signal!: AbortSignal;
+    let runs = 0;
+    await setup([{
+      ...fake('claude-code-cli'),
+      run: async (_req, ctx) => {
+        runs++;
+        signal = ctx.signal;
+        await starting;
+        ctx.onSteerReady?.((text) => (received.push(text), true));
+        await working;
+        ctx.onSteerReady?.(null);
+        return emptyResult({ status: 'succeeded', durationMs: 1, text: 'both done', numTurns: 1 });
+      },
+    }]);
+    const chat = orbit.chat.start({ message: 'Implement the feature' });
+    orbit.chat.send(chat.id, { message: 'Also add tests' });
+    await until(() => runs === 1);
+    expect(signal.aborted).toBe(false);
+    open();
+    await until(() => received.length === 1);
+    expect(received).toEqual(['Also add tests']);
+    expect(orbit.chat.detail(chat.id).messages.at(-1)?.status).toBe('steered');
+    finish();
+    await until(() => !orbit.chat.isRunning(chat.id));
+    expect(runs).toBe(1);
+  });
+
+  it.each([true, false])('retains every request and image over repeated continuations (resumable: %s)', async (resumable) => {
+    const calls: AgentRunRequest[] = [];
+    const contexts: AgentRunContext[] = [];
+    await setup([{
+      ...fake('claude-code-cli', { resumable }),
+      run: async (req, ctx) => {
+        calls.push(req);
+        contexts.push(ctx);
+        if (calls.length > 2) return emptyResult({ status: 'succeeded', durationMs: 1, text: 'all three done', numTurns: 1 });
+        ctx.onEvent({ type: 'tool', tool: 'Bash', id: 'a', summary: 'Build' });
+        ctx.onEvent({ type: 'tool', tool: 'Read', id: 'b', summary: 'Read' });
+        await new Promise<void>((resolve) => ctx.signal.addEventListener('abort', () => resolve(), { once: true }));
+        return emptyResult({ status: 'cancelled', durationMs: 1, sessionId: resumable ? 'same-task' : null });
+      },
+    }]);
+    const png = { name: 'original.png', mediaType: 'image/png' as const, data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==' };
+    const chat = orbit.chat.start({ message: 'Build the original feature', images: [png] });
+    await until(() => calls.length === 1);
+    orbit.chat.send(chat.id, { message: 'Also add tests', images: [{ ...png, name: 'tests.png' }] });
+    contexts[0]!.onEvent({ type: 'tool_result', id: 'a', isError: false, summary: 'Build finished' });
+    expect(contexts[0]!.signal.aborted).toBe(false); // the other tool is still running
+    contexts[0]!.onEvent({ type: 'tool_result', id: 'b', isError: false, summary: 'Read finished' });
+    await until(() => calls.length === 2);
+    expect(calls[1]?.prompt).toContain('Original request\nBuild the original feature');
+    expect(calls[1]?.prompt).toContain('Additional instruction 1\nAlso add tests');
+    expect(calls[1]?.images).toHaveLength(2);
+    orbit.chat.send(chat.id, { message: 'And update the docs' });
+    contexts[1]!.onEvent({ type: 'tool_result', id: 'a', isError: false, summary: 'Build finished' });
+    contexts[1]!.onEvent({ type: 'tool_result', id: 'b', isError: false, summary: 'Read finished' });
+    await until(() => calls.length === 3 && !orbit.chat.isRunning(chat.id));
+    expect(calls[2]?.prompt).toContain('Original request\nBuild the original feature');
+    expect(calls[2]?.prompt).toContain('Additional instruction 1\nAlso add tests');
+    expect(calls[2]?.prompt).toContain('Additional instruction 2\nAnd update the docs');
+    expect(calls[2]?.prompt.match(/Original request/g)).toHaveLength(1);
+    expect(calls[2]?.images?.map((image) => image.path)).toEqual(calls[1]?.images?.map((image) => image.path));
+    expect(calls[2]?.session?.resumeId).toBe(resumable ? 'same-task' : null);
+  });
+
+  it('stops without resuming queued additions when the developer presses Stop', async () => {
+    let runs = 0;
+    await setup([{
+      ...fake('claude-code-cli'),
+      run: async (_req, ctx) => {
+        runs++;
+        await new Promise<void>((resolve) => ctx.signal.addEventListener('abort', () => resolve(), { once: true }));
+        return emptyResult({ status: 'cancelled', durationMs: 1 });
+      },
+    }]);
+    const chat = orbit.chat.start({ message: 'Long task' });
+    await until(() => runs === 1);
+    orbit.chat.send(chat.id, { message: 'Also add tests' });
+    orbit.chat.cancel(chat.id);
+    await until(() => !orbit.chat.isRunning(chat.id));
+    expect(runs).toBe(1);
+    expect(orbit.chat.detail(chat.id).messages.at(-1)?.status).toBe('cancelled');
   });
 });
 

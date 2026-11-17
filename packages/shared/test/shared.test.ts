@@ -8,6 +8,7 @@ import {
   MISSION_TRANSITIONS,
   mergeSettings,
   defaultSettings,
+  parseStoredSettings,
   parseCommandLine,
   parseOrbitCommand,
   parseUnifiedDiff,
@@ -115,6 +116,15 @@ describe('diff parsing', () => {
 });
 
 describe('settings', () => {
+  it('sends follow-ups by default, including for existing saved settings', () => {
+    const settings = defaultSettings();
+    expect(settings.execution.sessionFollowUps).toBe('send');
+    const { sessionFollowUps: _removed, ...legacyExecution } = settings.execution;
+    const migrated = parseStoredSettings({ ...settings, execution: { ...legacyExecution, suggestNext: false } });
+    expect(migrated.execution.sessionFollowUps).toBe('send');
+    expect(migrated.execution.suggestNext).toBe(false);
+    expect(mergeSettings(migrated, { execution: { sessionFollowUps: 'queue' } }).execution.sessionFollowUps).toBe('queue');
+  });
   it('merges partial patches and validates', () => {
     const s = mergeSettings(defaultSettings(), { execution: { maxConcurrentMissions: 3 } });
     expect(s.execution.maxConcurrentMissions).toBe(3);

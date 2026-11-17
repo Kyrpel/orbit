@@ -403,4 +403,22 @@ ALTER TABLE conversations ADD COLUMN compact_from TEXT;
     id: '0013_plan_message_kind',
     sql: `ALTER TABLE conversation_messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat';`,
   },
+  {
+    id: '0014_plain_folder_sessions',
+    // Earlier versions forced plain folders to read-only. Keep any explicit permission choice.
+    sql: `
+UPDATE repos SET allow_modify = 1
+WHERE is_git = 0 AND allow_modify = 0
+  AND EXISTS (
+    SELECT 1 FROM audit_log
+    WHERE target = repos.id AND action = 'repo.connected'
+      AND summary LIKE '% as read-only: it is not a git repository'
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM audit_log, json_each(COALESCE(audit_log.details, '[]')) AS field
+    WHERE audit_log.target = repos.id AND audit_log.action = 'repo.updated'
+      AND field.value = 'allowModify'
+  );
+`,
+  },
 ];

@@ -1,4 +1,5 @@
 import { readFileSync, statSync } from 'node:fs';
+import { readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { OrbitError, redactSecrets, type RepoChangesDTO } from '@orbit/shared';
 import type { RepoRow } from '@orbit/database';
@@ -57,14 +58,36 @@ export async function repoChanges(ctx: OrbitContext, repo: RepoRow): Promise<Rep
 
 const SKIPPED_DIRS = /(^|\/)(node_modules|\.git|\.venv|__pycache__|\.pytest_cache|\.mypy_cache|\.turbo)(\/|$)/;
 
+/** Plain folders have no git index: scan a bounded tree without following links outside it. */
+async function folderFiles(root: string): Promise<string[]> {
+  const pending = [''];
+  const files: string[] = [];
+  let visited = 0;
+  for (let i = 0; i < pending.length && visited < 10_000; i++) {
+    const prefix = pending[i]!;
+    const entries = await readdir(path.join(root, prefix), { withFileTypes: true }).catch(() => []);
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      if (++visited > 10_000) break;
+      const rel = `${prefix}${entry.name}`;
+      if (entry.isSymbolicLink() || SKIPPED_DIRS.test(rel)) continue;
+      if (entry.isDirectory()) {
+        if (rel.split('/').length < 20 && !/(^|\/)(dist|build|coverage|\.next|\.cache)(\/|$)/.test(rel)) pending.push(`${rel}/`);
+      } else if (entry.isFile()) files.push(rel);
+    }
+  }
+  return files;
+}
+
 /**
  * Files and folders to complete an `@mention` in the prompt: the project's own files (tracked or new,
- * not ignored), best matches first. With no query, the top of the tree. Plain folders without git have none.
+ * not ignored in git projects), best matches first. With no query, the top of the tree.
  */
 export async function repoFiles(ctx: OrbitContext, repo: RepoRow, query: string, limit = 30): Promise<string[]> {
-  if (!repo.isGit) return [];
-  const out = await ctx.git.run(repo.localPath, ['ls-files', '-co', '--exclude-standard', '-z']);
-  const files = [...new Set(out.split('\0').filter((f) => f && !SKIPPED_DIRS.test(f)))];
+  const paths = repo.isGit
+    ? (await ctx.git.run(repo.localPath, ['ls-files', '-co', '--exclude-standard', '-z'])).split('\0')
+    : await folderFiles(repo.localPath);
+  const files = [...new Set(paths.filter((f) => f && !SKIPPED_DIRS.test(f)))];
   const dirs = new Set<string>();
   for (const f of files) {
     for (let i = f.indexOf('/'); i !== -1; i = f.indexOf('/', i + 1)) dirs.add(f.slice(0, i + 1));

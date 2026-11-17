@@ -27,3 +27,11 @@ export function clockTime(iso: string): string {
 export function shortSha(sha: string | null | undefined): string {
   return sha ? sha.slice(0, 8) : '—';
 }
+
+/** The end of a folder path, the part that tells projects apart: `…\Documents\orbit`. */
+export function shortPath(path: string, keep = 2): string {
+  const sep = path.includes('\\') ? '\\' : '/';
+  const parts = path.split(/[\\/]+/).filter(Boolean);
+  if (parts.length <= keep + 1) return path;
+  return `…${sep}${parts.slice(-keep).join(sep)}`;
+}

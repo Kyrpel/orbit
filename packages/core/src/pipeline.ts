@@ -275,7 +275,7 @@ export class Pipeline {
       if (candidateIds.length === 0 && m.sourceProjectId) {
         candidateIds = this.ctx.db.select().from(projectRepos).where(eq(projectRepos.projectId, m.sourceProjectId)).all().map((r) => r.repoId);
       }
-      let candidates = this.repoService.rowsByIds(candidateIds).filter((r) => r.allowModify);
+      let candidates = this.repoService.rowsByIds(candidateIds).filter((r) => r.allowModify && r.isGit);
       if (candidates.length === 0) {
         throw new BlockedError(
           m.sourceProjectId

@@ -100,6 +100,32 @@ describe('Cursor CLI runtime', () => {
     expect(result).toMatchObject({ status: 'failed', error: expect.stringContaining('OS-level isolation') });
   });
 
+  it.skipIf(process.platform !== 'win32')('stops the Windows launcher and child so a task can continue after a step', async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'orbit-cursor-stop-'));
+    dirs.push(root);
+    const script = path.join(root, 'agent.cjs');
+    const launcher = path.join(root, 'agent.cmd');
+    const pidFile = path.join(root, 'child.pid');
+    writeFileSync(script, `
+      require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+      console.log(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'original-session' }));
+      console.log(JSON.stringify({ type: 'tool_call', subtype: 'started', call_id: 'step', tool_call: { readToolCall: { args: { path: 'file.ts' } } } }));
+      console.log(JSON.stringify({ type: 'tool_call', subtype: 'completed', call_id: 'step', tool_call: { readToolCall: { args: { path: 'file.ts' }, result: { success: { totalLines: 1 } } } } }));
+      setInterval(() => {}, 1000);
+    `);
+    writeFileSync(launcher, `@echo off\r\n"${process.execPath}" "${script}"\r\n`);
+    const abort = new AbortController();
+    const runtime = new CursorCliRuntime(launcher);
+    const result = await runtime.run({ ...base, cwd: root, timeoutMs: 15_000, stateDir: path.join(root, 'state') }, {
+      signal: abort.signal,
+      onEvent: (event) => { if (event.type === 'tool_result') abort.abort(); },
+    });
+    expect(result.status).toBe('cancelled');
+    expect(result.sessionId).toBe('original-session');
+    const pid = Number(readFileSync(pidFile, 'utf8'));
+    expect(() => process.kill(pid, 0)).toThrow();
+  });
+
   it('turns Cursor\'s tool events into Orbit steps, and records commands that need your OK', () => {
     const denied: { tool: string; reason: string; command?: string }[] = [];
     const shell = (subtype: string, result?: unknown) => ({ type: 'tool_call', subtype, call_id: 'c1', tool_call: { shellToolCall: { args: { command: 'npm run lint' }, ...(result ? { result } : {}) } } });

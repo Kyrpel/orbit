@@ -215,7 +215,7 @@ function ReviewDecision({ d }: { d: MissionDetailDTO }) {
           {!review ? 'No automated review' : blocking.length ? `${blocking.length} blocking review finding${blocking.length > 1 ? 's' : ''}` : 'Reviewer found no blocking issues'}
         </li>
       </ul>
-      <p className="text-xs text-dust">Approving commits the changes on the mission branch, on this machine only. You approve the pull request separately.</p>
+      <p className="text-xs text-dust">Approving saves the changes as a commit on this task's own branch, on this computer only. You approve the pull request separately.</p>
       <div className="flex flex-col gap-2">
         <Button variant="primary" loading={approve.isPending} onClick={() => approve.mutate({})}>
           <Check className="size-4" /> Approve changes
@@ -291,7 +291,7 @@ function PublishDecision({ d }: { d: MissionDetailDTO }) {
 }
 
 function Decision({ d }: { d: MissionDetailDTO }) {
-  const cancel = useMissionAction(d.id, 'cancel', 'Mission cancelled');
+  const cancel = useMissionAction(d.id, 'cancel', 'Task cancelled');
   const retry = useMissionAction(d.id, 'retry', 'Retrying');
   const replan = useMissionAction(d.id, 'replan', 'Replanning');
   const complete = useMissionAction(d.id, 'complete', 'Marked complete');
@@ -317,7 +317,7 @@ function Decision({ d }: { d: MissionDetailDTO }) {
     title = 'Approve the pull request';
     body = <PublishDecision d={d} />;
   } else if (d.status === 'BLOCKED' || d.status === 'FAILED') {
-    title = d.status === 'BLOCKED' ? 'Orbit needs you' : 'The mission failed';
+    title = d.status === 'BLOCKED' ? 'Orbit needs you' : 'This task failed';
     const machineFix =
       d.status === 'BLOCKED' && (d.blockedCode === 'needs_consent' || d.blockedCode === 'sandbox_unavailable' || (!d.blockedCode && machineNeeds(d).any));
     body = (
@@ -357,7 +357,7 @@ function Decision({ d }: { d: MissionDetailDTO }) {
           ))}
         <p className="text-xs text-dust">Merge it on GitHub when you are happy. Orbit never merges for you.</p>
         <Button className="w-full" loading={complete.isPending} onClick={() => complete.mutate({})}>
-          Mark mission complete
+          Mark as complete
         </Button>
       </div>
     );
@@ -374,12 +374,12 @@ function Decision({ d }: { d: MissionDetailDTO }) {
         {body}
         {cancellable ? (
           <Button variant="ghost" size="sm" className="w-full text-dust" loading={cancel.isPending} onClick={() => cancel.mutate({ reason: null })}>
-            Cancel mission
+            Cancel task
           </Button>
         ) : null}
         {d.status === 'PR_CREATED' || d.status === 'COMPLETED' ? (
           <Button variant="ghost" size="sm" className="w-full" onClick={() => setReceipt(true)}>
-            <Receipt className="size-4" /> Mission receipt
+            <Receipt className="size-4" /> Receipt
           </Button>
         ) : null}
       </div>
@@ -394,7 +394,7 @@ function ReceiptDialog({ id, open, onOpenChange }: { id: string; open: boolean; 
   const r = receipt.data;
   const svgUrl = r ? `data:image/svg+xml;utf8,${encodeURIComponent(r.share.svg)}` : '';
   return (
-    <Dialog open={open} onOpenChange={onOpenChange} title="Mission receipt" description="The share version leaves out repository names, task text, people and code." wide>
+    <Dialog open={open} onOpenChange={onOpenChange} title="Receipt" description="The share version leaves out project names, task text, people and code." wide>
       {!r ? (
         <Loading />
       ) : (
@@ -407,7 +407,7 @@ function ReceiptDialog({ id, open, onOpenChange }: { id: string; open: boolean; 
               Private version
             </Button>
           </div>
-          {mode === 'share' ? <img src={svgUrl} alt="Mission receipt card" className="w-full rounded-[10px] border border-seam" /> : null}
+          {mode === 'share' ? <img src={svgUrl} alt="Receipt card" className="w-full rounded-[10px] border border-seam" /> : null}
           <pre className="mono max-h-72 overflow-auto whitespace-pre-wrap rounded-[10px] border border-seam bg-night p-4 text-xs">{mode === 'share' ? r.share.markdown : r.markdown}</pre>
           <div className="flex gap-2">
             <Button size="sm" onClick={() => void navigator.clipboard.writeText(mode === 'share' ? r.share.markdown : r.markdown)}>
@@ -491,7 +491,7 @@ function Overview({ d }: { d: MissionDetailDTO }) {
               </div>
             ) : null}
             {plan.droppedRepositories.length ? (
-              <p className="text-xs text-fault">Ignored {plan.droppedRepositories.map((r) => `"${r.name}"`).join(', ')}: not authorized for this mission.</p>
+              <p className="text-xs text-fault">Ignored {plan.droppedRepositories.map((r) => `"${r.name}"`).join(', ')}: not allowed for this task.</p>
             ) : null}
           </div>
         )}
@@ -757,7 +757,7 @@ export function MissionPage() {
   return (
     <>
       <Link to="/missions" className="mb-5 inline-flex items-center gap-1.5 text-xs text-dust hover:text-chalk">
-        <ArrowLeft className="size-3.5" /> Missions
+        <ArrowLeft className="size-3.5" /> All tasks
       </Link>
       <header className="mb-6">
         <div className="flex flex-wrap items-start justify-between gap-4">
@@ -780,7 +780,7 @@ export function MissionPage() {
 
       {d.requirementsChanged ? (
         <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-signal/40 bg-signal/6 px-4 py-3 text-sm">
-          <span>The task changed after this mission started. Orbit is still working from the snapshot it took at the start.</span>
+          <span>The task changed after Autopilot started. Orbit is still working from the version it read at the start.</span>
           {d.allowedActions.includes('replan') ? (
             <Button size="sm" loading={replan.isPending} onClick={() => replan.mutate({ refreshSource: true })}>
               Replan with the latest version

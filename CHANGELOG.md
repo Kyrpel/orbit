@@ -4,7 +4,16 @@ All notable changes to Orbit are documented here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- A simpler, friendlier dashboard in both looks (Terminal and Light). The top bar has three places (Workspace, Autopilot, Projects) and one Settings area with General, Agents, Skills, Connections and Activity. Workspace tabs and pane headers fit on one line, and layout controls appear only when several tabs are open. The Light session moves mode, AI, model and effort into one line under the message box.
+- Plain language throughout: Autopilot "missions" are now "tasks", settings and agent descriptions explain what they do, and rarely needed options are folded away.
+- First-run setup is three steps (a project, your AI, optional GitHub and Asana) instead of seven.
+
 ### Fixed
+
+- Stop works on Windows for every AI. Orbit now ends the AI and everything it started (tool servers, commands still running), not just its launcher, and stops waiting on output once the AI has exited. Before, a stopped session could stay "working" forever and every message sent after it waited in the queue.
+- Phone-width layouts: the top bar wraps instead of hiding Projects, and Settings, Agents and Skills no longer scroll sideways.
 
 - Resolve Hugging Face model metadata before listing files so missing-model errors are consistent.
 

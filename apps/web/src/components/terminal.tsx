@@ -471,7 +471,7 @@ function Transcript({ chat, folder, onRetry, onUnqueue, onStop }: { chat: Conver
               {m.status === 'queued' ? (
                 <span className="t-dim">
                   {' '}
-                  (queued, sends when the agent finishes ·{' '}
+                  (waiting to send ·{' '}
                   <button type="button" onClick={() => onUnqueue(m.id)} className="underline underline-offset-2 hover:t-fg">
                     remove
                   </button>
@@ -772,6 +772,8 @@ const PANE = 'flex min-h-0 min-w-0 flex-1 flex-col bg-[var(--t-bg)] text-[13.5px
 function TermRunning({ repo, tab, sessionId, active, onExpand }: { repo: RepoDTO; tab: WorkspaceTab; sessionId: string; active: boolean; onExpand?: () => void }) {
   const navigate = useNavigate();
   const chat = useChat(sessionId);
+  const settings = useSettings();
+  const queueFollowUps = settings.data?.execution.sessionFollowUps === 'queue';
   const invalidate = [keys.chats, keys.chat(sessionId)];
   const send = useAction((v: { message: string; now?: boolean; images?: ChatImageInput[]; permissionMode?: SessionPermissionMode }) => post<ConversationDetailDTO>(`/api/chats/${sessionId}/messages`, v), { invalidate });
   const compact = useAction((focus: string) => post<ConversationDetailDTO>(`/api/chats/${sessionId}/compact`, { focus }), { invalidate });
@@ -815,7 +817,7 @@ function TermRunning({ repo, tab, sessionId, active, onExpand }: { repo: RepoDTO
 
   const running = c.messages.some((m) => m.status === 'running');
   const editing = c.mode === 'edit';
-  const canEdit = repo.allowModify && repo.isGit;
+  const canEdit = repo.allowModify;
   const securitySeat = c.seat === 'security';
   // A command you ran yourself with `!` is not the agent's answer, even when it failed.
   const lastAgent = [...c.messages].reverse().find((m) => m.role === 'assistant' && m.kind !== 'shell');
@@ -935,7 +937,7 @@ function TermRunning({ repo, tab, sessionId, active, onExpand }: { repo: RepoDTO
           suggestion={c.nextPrompt}
           messages={c.messages}
           onShell={canEdit ? (command, done) => shell.mutate(command, { onSuccess: done }) : undefined}
-          placeholder={running ? (c.steerable ? `Message ${ai === 'The agent' ? 'the agent' : ai}: it reads it at its next step` : 'Type a message: it is sent when the agent finishes') : ''}
+          placeholder={running ? (queueFollowUps ? 'Type a message: it is sent when the agent finishes' : c.steerable ? `Add to ${ai === 'The agent' ? 'the agent’s' : `${ai}’s`} current task: it reads it at its next step` : 'Add to the current task: read at the next completed step') : ''}
           commands={{
             clear: actions.clear,
             open: actions.open,
@@ -978,7 +980,7 @@ function TermRunning({ repo, tab, sessionId, active, onExpand }: { repo: RepoDTO
 function TermNew({ repo, tab, active, onExpand }: { repo: RepoDTO; tab: WorkspaceTab; active: boolean; onExpand?: () => void }) {
   const navigate = useNavigate();
   const settings = useSettings();
-  const canEdit = repo.allowModify && repo.isGit;
+  const canEdit = repo.allowModify;
   const [draft, setDraft] = useState(() => takeDraft(tab.key));
   const [sentText, setSentText] = useState<string | null>(null);
   const [provider, setProvider] = useState<Provider>('auto');

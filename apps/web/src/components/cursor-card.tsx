@@ -3,6 +3,7 @@ import { useMemo, useState } from 'react';
 import type { CursorModelDTO, CursorStatusDTO } from '@orbit/shared';
 import { keys, post, useAction } from '../lib/api';
 import { InstructionsEditor } from './openrouter-card';
+import { AiRow } from './provider';
 import { Button, Code, Input, Tag } from './ui';
 
 /*
@@ -45,22 +46,21 @@ export function CursorCard({ status }: { status: CursorStatusDTO }) {
   }, [query, status.catalog, status.models]);
 
   return (
-    <div className="rounded-[10px] border border-seam px-4 py-3 md:col-span-2">
-      <div className="flex items-center gap-2">
-        <span className="size-2 rounded-full bg-cursor" aria-hidden />
-        <span className="font-[620]">Cursor</span>
-        <span className="text-2xs text-dust">your Cursor subscription</span>
-        {status.ready ? (
-          <Tag tone="success" className="ml-auto">
+    <AiRow
+      dot="bg-cursor"
+      name="Cursor"
+      tagline={status.ready ? `${status.models.length} ${status.models.length === 1 ? 'model' : 'models'} in your Model menu` : 'The models in your Cursor subscription'}
+      status={
+        status.ready ? (
+          <Tag tone="success">
             <Check className="size-3" aria-hidden /> Ready
           </Tag>
         ) : (
-          <Tag tone="neutral" className="ml-auto">
-            {status.installed ? 'Not signed in' : 'Not installed'}
-          </Tag>
-        )}
-      </div>
-      <p className="mt-1.5 max-w-[78ch] text-2xs text-dust">
+          <Tag tone="neutral">{status.installed ? 'Not signed in' : 'Not installed'}</Tag>
+        )
+      }
+    >
+      <p className="max-w-[78ch] text-2xs text-dust">
         Choose Cursor as the AI in a session (or with /ai), then the model. Orbit runs Cursor's own agent with your Cursor login, so it uses your subscription and never your Claude or Codex plan. In Auto-accept, Cursor's own safety check decides which commands run; in Ask first you approve each new command.
       </p>
 
@@ -124,6 +124,6 @@ export function CursorCard({ status }: { status: CursorStatusDTO }) {
           ) : null}
         </div>
       ) : null}
-    </div>
+    </AiRow>
   );
 }

@@ -16,20 +16,20 @@ export function NewMissionDialog({ open, onOpenChange, initial }: { open: boolea
   const [title, setTitle] = useState(initial?.title ?? '');
   const [description, setDescription] = useState(initial?.description ?? '');
   const [selected, setSelected] = useState<string[]>(initial?.repoIds ?? []);
-  const modifiable = (repos.data ?? []).filter((r) => r.allowModify);
+  const modifiable = (repos.data ?? []).filter((r) => r.allowModify && r.isGit);
   const chosen = selected.length ? selected : modifiable.length === 1 ? [modifiable[0]!.id] : [];
 
   const create = useAction(
     () => post<{ mission: MissionSummaryDTO; created: boolean }>('/api/missions', { title, description, repoIds: chosen }),
-    { success: 'Mission created. Orbit is planning it now.', invalidate: [['missions'], keys.overview] },
+    { success: 'Task started. The planner is on it.', invalidate: [['missions'], keys.overview] },
   );
 
   return (
     <Dialog
       open={open}
       onOpenChange={onOpenChange}
-      title="Run with Orbit"
-      description="Describe the change. Orbit plans it, implements it in an isolated worktree, runs your checks and waits for your approval before anything is pushed."
+      title="New Autopilot task"
+      description="Describe the change. Your agents plan it, build it in a separate copy of the project and run your checks. Nothing reaches your project until you approve."
       wide
       footer={
         <>
@@ -51,7 +51,7 @@ export function NewMissionDialog({ open, onOpenChange, initial }: { open: boolea
               })
             }
           >
-            Start mission
+            Start task
           </Button>
         </>
       }
@@ -60,11 +60,11 @@ export function NewMissionDialog({ open, onOpenChange, initial }: { open: boolea
         <Field label="What should change?" htmlFor="m-title">
           <Input id="m-title" autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Add rate limiting to the login endpoint" />
         </Field>
-        <Field label="Details and acceptance criteria" htmlFor="m-desc" hint="The more concrete, the better the plan. Orbit treats this text as requirements, not as instructions about its own rules.">
+        <Field label="Details" htmlFor="m-desc" hint="What should be true when it is done? The more concrete, the better the plan.">
           <Textarea id="m-desc" rows={6} value={description} onChange={(e) => setDescription(e.target.value)} placeholder={'Limit to 5 attempts per minute per IP.\nReturn 429 with a Retry-After header.\nAdd a test.'} />
         </Field>
         <Field label="Which project should this change go into?">
-          {modifiable.length === 0 ? <p className="text-sm text-dust">Connect a project in Projects first.</p> : <ProjectChooser repos={modifiable} value={chosen} onChange={setSelected} />}
+          {modifiable.length === 0 ? <p className="text-sm text-dust">Autopilot needs a project that uses Git. Plain folders work in the Workspace.</p> : <ProjectChooser repos={modifiable} value={chosen} onChange={setSelected} />}
         </Field>
       </div>
     </Dialog>

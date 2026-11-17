@@ -14,7 +14,7 @@ export function ProjectChooser({ repos, value, onChange }: { repos: RepoDTO[]; v
   const [filter, setFilter] = useState('');
   const shown = repos.filter((r) => !filter.trim() || `${r.name} ${r.localPath}`.toLowerCase().includes(filter.trim().toLowerCase()));
 
-  if (repos.length === 0) return <p className="text-sm text-dust">Connect a project first.</p>;
+  if (repos.length === 0) return <p className="text-sm text-dust">Add a project first.</p>;
 
   const row = (r: RepoDTO, control: React.ReactNode) => (
     <div className="flex min-w-0 items-center gap-3">

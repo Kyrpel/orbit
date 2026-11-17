@@ -2,6 +2,7 @@ import { Check, KeyRound, MessageSquareText, NotebookPen, Plus, Wrench, X } from
 import { useState } from 'react';
 import { MAX_MODEL_INSTRUCTIONS, type OpenRouterModelDTO, type OpenRouterStatusDTO } from '@orbit/shared';
 import { del, keys, post, useAction } from '../lib/api';
+import { AiRow } from './provider';
 import { Button, Input, Tag, Textarea } from './ui';
 
 /*
@@ -132,22 +133,21 @@ export function OpenRouterCard({ status }: { status: OpenRouterStatusDTO }) {
   const acct = status.account;
 
   return (
-    <div className="rounded-[10px] border border-seam px-4 py-3 md:col-span-2">
-      <div className="flex items-center gap-2">
-        <span className="size-2 rounded-full bg-openrouter" aria-hidden />
-        <span className="font-[620]">OpenRouter</span>
-        <span className="text-2xs text-dust">DeepSeek, Hermes and other models in your sessions</span>
-        {status.connected ? (
-          <Tag tone="success" className="ml-auto">
+    <AiRow
+      dot="bg-openrouter"
+      name="OpenRouter"
+      tagline={status.connected ? `${status.models.length} ${status.models.length === 1 ? 'model' : 'models'} in your Model menu` : 'DeepSeek, Hermes and many other models, with your OpenRouter key'}
+      status={
+        status.connected ? (
+          <Tag tone="success">
             <Check className="size-3" aria-hidden /> Connected
           </Tag>
         ) : (
-          <Tag tone="neutral" className="ml-auto">
-            Not connected
-          </Tag>
-        )}
-      </div>
-      <p className="mt-1.5 max-w-[78ch] text-2xs text-dust">
+          <Tag tone="neutral">Not connected</Tag>
+        )
+      }
+    >
+      <p className="max-w-[78ch] text-2xs text-dust">
         In a session, choose OpenRouter as the AI (next to Auto, Claude and Codex, or with /ai), then pick the model. They run inside Claude Code's tools with your OpenRouter key, never your Claude login, and OpenRouter bills your credits. These models may handle Claude Code's tools less reliably than Claude does.
       </p>
 
@@ -205,6 +205,6 @@ export function OpenRouterCard({ status }: { status: OpenRouterStatusDTO }) {
           </Button>
         </form>
       </div>
-    </div>
+    </AiRow>
   );
 }

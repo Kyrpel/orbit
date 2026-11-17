@@ -32,7 +32,7 @@ function useDebounced<T>(value: T, ms = 250): T {
 function Source({ url }: { url: string | null }) {
   if (!url) return null;
   return (
-    <a href={url} target="_blank" rel="noreferrer" className="inline-flex min-w-0 items-center gap-1 text-2xs text-dust hover:text-chalk">
+    <a href={url} target="_blank" rel="noreferrer" className="inline-flex min-w-0 max-w-full items-center gap-1 text-2xs text-dust hover:text-chalk">
       <span className="truncate">{url.replace(/^https:\/\/(www\.)?/, '')}</span>
       <ExternalLink className="size-3 shrink-0" aria-hidden />
     </a>
@@ -208,23 +208,23 @@ export function SkillsPage() {
     <>
       <PageHeader
         title="Skills"
-        description="Skills teach your agents new abilities: a design system, a framework, a way of working. These are Claude Code's own plugins, so anything you install here also works in your terminal."
+        description="Skills teach your agents new abilities: a design style, a framework, a way of working. They are Claude Code plugins, so what you install here also works in your terminal."
         action={
-          <Button onClick={() => refresh.mutate(undefined)} loading={refresh.isPending} title="Get the newest catalogs from every marketplace">
-            <RefreshCw className="size-4" /> Refresh catalogs
+          <Button variant="ghost" onClick={() => refresh.mutate(undefined)} loading={refresh.isPending} title="Get the newest list from every marketplace">
+            <RefreshCw className="size-4" /> Refresh the list
           </Button>
         }
       />
 
-      <label className="flex h-12 items-center gap-3 rounded-[14px] border border-seam-2 bg-hull px-4 text-dust focus-within:border-telemetry/70 focus-within:shadow-[0_0_0_3px_rgb(11_124_113/0.12)]">
+      <label className="flex h-12 items-center gap-3 rounded-[12px] border border-seam-2 bg-hull px-4 text-dust transition-colors focus-within:border-telemetry">
         <Search className="size-4 shrink-0" aria-hidden />
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder={totalAll ? `Search ${totalAll.toLocaleString()} plugins: design, testing, supabase, stripe…` : 'Search plugins'}
-          aria-label="Search plugins"
+          placeholder={totalAll ? `Search ${totalAll.toLocaleString()} skills: design, testing, supabase, stripe…` : 'Search skills'}
+          aria-label="Search skills"
           autoFocus
-          className="min-w-0 flex-1 bg-transparent text-[15px] text-chalk outline-none placeholder:text-dust-2"
+          className="min-w-0 flex-1 bg-transparent text-[15px] text-chalk outline-none placeholder:text-dust"
         />
         {skills.isFetching ? <RefreshCw className="size-4 shrink-0 animate-spin" aria-label="Searching" /> : null}
       </label>
@@ -244,7 +244,7 @@ export function SkillsPage() {
 
       {skills.isPending ? (
         <div className="mt-8">
-          <Loading label="Reading Claude Code's marketplaces" />
+          <Loading label="Looking up the available skills" />
         </div>
       ) : skills.error ? (
         <div className="mt-6">
@@ -252,14 +252,14 @@ export function SkillsPage() {
         </div>
       ) : d && !d.available ? (
         <Panel className="mt-6 p-5">
-          <p className="text-sm font-[650]">Claude Code&apos;s plugins are not available right now</p>
+          <p className="text-sm font-[650]">Skills are not available right now</p>
           <p className="mt-1 text-sm text-dust">{d.reason}</p>
         </Panel>
       ) : d ? (
         <div className="mt-6 space-y-6">
           {filter !== 'installed' && !q && d.installed.length ? (
             <Panel>
-              <PanelHeader title={`Installed (${d.installed.length})`} description="Turned-on plugins load in every Claude session, in Orbit and in your terminal." />
+              <PanelHeader title={`Installed (${d.installed.length})`} description="The ones switched on load in every Claude session, in Orbit and in your terminal." />
               <ul className="divide-y divide-seam">
                 {d.installed.map((p) => (
                   <PluginRow key={p.id} p={p} onInstall={setInstalling} onDetails={setDetails} />
@@ -270,8 +270,8 @@ export function SkillsPage() {
 
           <Panel>
             <PanelHeader
-              title={filter === 'installed' ? 'Installed plugins' : q ? `${d.total.toLocaleString()} ${d.total === 1 ? 'match' : 'matches'}` : 'Most installed'}
-              description={q ? 'Best matches first, then the most installed.' : filter === 'installed' ? undefined : 'Popular plugins first. Search to find anything else.'}
+              title={filter === 'installed' ? 'Installed' : q ? `${d.total.toLocaleString()} ${d.total === 1 ? 'match' : 'matches'}` : 'Most installed'}
+              description={q ? 'Best matches first, then the most installed.' : filter === 'installed' ? undefined : 'The popular ones first. Search to find anything else.'}
             />
             {d.results.length ? (
               <ul className="divide-y divide-seam">
@@ -280,7 +280,7 @@ export function SkillsPage() {
                 ))}
               </ul>
             ) : (
-              <p className="px-5 py-6 text-sm text-dust">{q ? `Nothing matches "${q}". Try a shorter word, or refresh the catalogs.` : 'Nothing here yet.'}</p>
+              <p className="px-5 py-6 text-sm text-dust">{q ? `Nothing matches "${q}". Try a shorter word, or refresh the list.` : filter === 'installed' ? 'Nothing installed yet. Pick All to browse.' : 'Nothing here yet.'}</p>
             )}
             {d.total > d.results.length ? (
               <div className="border-t border-seam px-5 py-3">
@@ -294,7 +294,7 @@ export function SkillsPage() {
           <Panel>
             <PanelHeader
               title={`Your own skills (${d.skills.length})`}
-              description="Skill folders in Claude Code's skills folder. They load in every Claude session too."
+              description="Skills you keep in Claude Code's own skills folder. They load in every Claude session too."
               action={
                 d.skills.length ? (
                   <Button size="sm" variant="ghost" onClick={() => setShowOwn(!showOwn)} aria-expanded={showOwn}>
@@ -323,8 +323,8 @@ export function SkillsPage() {
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-[650]">Add a marketplace</p>
                 <p className="mt-0.5 text-xs text-dust">
-                  A GitHub repository or URL that publishes Claude Code plugins, like <span className="mono">anthropics/skills</span>. Only add marketplaces you trust: their plugins can
-                  run commands on this computer.
+                  A marketplace is a GitHub project or web address that publishes skills, like <span className="mono">anthropics/skills</span>. Only add ones you trust: what they
+                  publish can run commands on this computer.
                 </p>
                 <form
                   className="mt-3 flex gap-2"
@@ -341,7 +341,7 @@ export function SkillsPage() {
               </div>
             </div>
           </Panel>
-          <p className="text-2xs text-dust-2">Codex sessions do not use Claude Code plugins.</p>
+          <p className="text-xs text-dust">Skills work in Claude sessions. Codex sessions do not use them.</p>
         </div>
       ) : null}
 

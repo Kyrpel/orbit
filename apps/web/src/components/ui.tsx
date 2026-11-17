@@ -1,7 +1,7 @@
 import { cva, type VariantProps } from 'class-variance-authority';
-import { AlertTriangle, CheckCircle2, Info, Loader2, X } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, ChevronDown, Info, Loader2, X } from 'lucide-react';
 import { Checkbox as RCheckbox, Dialog as RDialog, Switch as RSwitch, Tabs as RTabs } from 'radix-ui';
-import { forwardRef, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type TextareaHTMLAttributes } from 'react';
+import { forwardRef, useId, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type TextareaHTMLAttributes } from 'react';
 import { MISSION_STATE_META, type MissionState, type StateTone } from '@orbit/shared';
 import { dismiss, useToasts } from '../lib/toast';
 import { cn } from '../lib/utils';
@@ -95,6 +95,43 @@ export function PageHeader({ title, description, action }: { title: ReactNode; d
       </div>
       {action ? <div className="flex items-center gap-2">{action}</div> : null}
     </header>
+  );
+}
+
+/**
+ * A row that opens to show more. Keeps a page short: the everyday answer is on the row,
+ * the details are one click away.
+ */
+export function Disclosure({
+  title,
+  summary,
+  trailing,
+  children,
+  defaultOpen = false,
+  className,
+}: {
+  title: ReactNode;
+  summary?: ReactNode;
+  /** Shown at the right of the row, before the arrow (a status, a badge). */
+  trailing?: ReactNode;
+  children: ReactNode;
+  defaultOpen?: boolean;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const id = useId();
+  return (
+    <div className={className}>
+      <button type="button" aria-expanded={open} aria-controls={id} onClick={() => setOpen(!open)} className="flex w-full items-center gap-3 px-5 py-3.5 text-left transition-colors hover:bg-hull-2/60">
+        <span className="min-w-0 flex-1">
+          <span className="block text-sm font-[600] text-chalk">{title}</span>
+          {summary ? <span className="mt-0.5 block text-xs text-dust">{summary}</span> : null}
+        </span>
+        {trailing}
+        <ChevronDown className={cn('size-4 shrink-0 text-dust transition-transform duration-200', open && 'rotate-180')} aria-hidden />
+      </button>
+      {open ? <div id={id}>{children}</div> : null}
+    </div>
   );
 }
 

@@ -8,8 +8,8 @@ test('run with Orbit: task to reviewed, committed change through the dashboard',
 
   await page.getByRole('button', { name: 'New task' }).click();
   await page.getByLabel('What should change?').fill('Document the cart total helper');
-  await page.getByLabel('Details and acceptance criteria').fill('Explain what total() returns.');
-  await page.getByRole('button', { name: 'Start mission' }).click();
+  await page.getByLabel('Details', { exact: true }).fill('Explain what total() returns.');
+  await page.getByRole('button', { name: 'Start task' }).click();
 
   await expect(page).toHaveURL(/\/missions\/msn_/);
   await expect(page.getByRole('heading', { name: 'Review the changes' })).toBeVisible();

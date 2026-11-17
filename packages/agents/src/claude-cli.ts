@@ -7,6 +7,7 @@ import { redactSecrets } from '@orbit/shared';
 import { emitAssistantContent, emitToolResults, permissionDenials, type ToolCallLog } from './claude-stream';
 import { buildAgentEnv } from './env';
 import { startLlamaGateway } from './llamacpp-gateway';
+import { releaseOutputOnExit, stopProcess } from './process-tree';
 import { ENGINEER_TOOLS, READ_ONLY_TOOLS } from './policy';
 import {
   emptyResult,
@@ -204,12 +205,15 @@ export class ClaudeCodeCliRuntime implements AgentRuntime {
   async run(req: AgentRunRequest, ctx: AgentRunContext): Promise<AgentRunResult> {
     const started = Date.now();
     const controller = new AbortController();
+    // Until the process starts there is only the signal to stop; then its whole process tree.
+    let stop = () => controller.abort();
+    let release: () => void = () => undefined;
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      controller.abort();
+      stop();
     }, req.timeoutMs);
-    const onAbort = () => controller.abort();
+    const onAbort = () => stop();
     if (ctx.signal.aborted) controller.abort();
     else ctx.signal.addEventListener('abort', onAbort, { once: true });
 
@@ -251,6 +255,8 @@ export class ClaudeCodeCliRuntime implements AgentRuntime {
         stderr: 'pipe',
         stdout: 'pipe',
       });
+      stop = () => stopProcess(sub, controller);
+      release = releaseOutputOnExit(sub);
       sub.stderr?.on('data', (d: Buffer) => {
         stderr.push(d.toString());
         if (stderr.length > 60) stderr.shift();
@@ -313,6 +319,7 @@ export class ClaudeCodeCliRuntime implements AgentRuntime {
       });
     } finally {
       closeInput();
+      release();
       clearTimeout(timer);
       ctx.signal.removeEventListener('abort', onAbort);
       await adapter?.close();

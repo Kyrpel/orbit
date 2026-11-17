@@ -57,7 +57,7 @@ function RepoDialog({ repo, open, onOpenChange }: { repo: RepoDTO; open: boolean
   const [verify, setVerify] = useState(repo.verifyCommands);
   const [branch, setBranch] = useState(repo.defaultBranch);
   const save = useAction(() => patch(`/api/repos/${repo.id}`, { setupCommands: setup.filter((c) => c.command.trim()), verifyCommands: verify.filter((c) => c.command.trim()), defaultBranch: branch }), {
-    success: 'Repository settings saved',
+    success: 'Checks saved',
     invalidate: [keys.repos],
   });
   const detect = useAction(() => post<{ setup: CommandSpec[]; verify: CommandSpec[] }>(`/api/repos/${repo.id}/detect-commands`), {});
@@ -66,8 +66,8 @@ function RepoDialog({ repo, open, onOpenChange }: { repo: RepoDTO; open: boolean
       open={open}
       onOpenChange={onOpenChange}
       wide
-      title={repo.name}
-      description="Commands run without a shell, one per line, in the mission worktree. Shell operators like && or | are rejected; add separate commands instead."
+      title={`Checks for ${repo.name}`}
+      description="The commands Autopilot runs to prepare and test its work. One command per line: instead of joining commands with && or |, add them separately."
       footer={
         <>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
@@ -80,11 +80,11 @@ function RepoDialog({ repo, open, onOpenChange }: { repo: RepoDTO; open: boolean
       }
     >
       <div className="space-y-6">
-        <Field label="Default branch" hint="Missions branch from here (from origin when it exists) and pull requests target it.">
+        <Field label="Main branch" hint="Autopilot starts each task from this branch, and its pull requests go back into it.">
           <Input className="mono" value={branch} onChange={(e) => setBranch(e.target.value)} />
         </Field>
-        <CommandsEditor title="Setup, once per worktree (for example installing dependencies)" list={setup} onChange={setSetup} />
-        <CommandsEditor title="Verification, after every implementation pass" list={verify} onChange={setVerify} />
+        <CommandsEditor title="Before it starts (for example installing dependencies)" list={setup} onChange={setSetup} />
+        <CommandsEditor title="After every change (your tests, a build, a linter)" list={verify} onChange={setVerify} />
         <Button
           size="sm"
           loading={detect.isPending}
@@ -97,7 +97,7 @@ function RepoDialog({ repo, open, onOpenChange }: { repo: RepoDTO; open: boolean
             })
           }
         >
-          <RefreshCw className="size-3.5" /> Detect from project files
+          <RefreshCw className="size-3.5" /> Suggest from the project files
         </Button>
       </div>
     </Dialog>
@@ -106,11 +106,13 @@ function RepoDialog({ repo, open, onOpenChange }: { repo: RepoDTO; open: boolean
 
 function RepoRow({ repo }: { repo: RepoDTO }) {
   const [editing, setEditing] = useState(false);
+  const [confirm, setConfirm] = useState(false);
   const toggle = useAction((allowModify: boolean) => patch(`/api/repos/${repo.id}`, { allowModify }), { invalidate: [keys.repos] });
-  const remove = useAction(() => del(`/api/repos/${repo.id}`), { success: `Disconnected ${repo.name}. Files were not touched.`, invalidate: [keys.repos] });
-  const enabled = repo.verifyCommands.filter((c) => c.enabled);
+  const remove = useAction(() => del(`/api/repos/${repo.id}`), { success: `Removed ${repo.name} from Orbit. The folder was not touched.`, invalidate: [keys.repos] });
+  const checks = repo.verifyCommands.filter((c) => c.enabled).length;
+  const facts = [repo.summary?.languages.slice(0, 3).join(', '), repo.isGit ? `branch ${repo.defaultBranch}` : 'plain folder', repo.isGit && checks ? `${checks} ${checks === 1 ? 'check' : 'checks'}` : null].filter(Boolean);
   return (
-    <li className="flex flex-wrap items-center gap-4 px-5 py-3.5">
+    <li className="flex flex-wrap items-center gap-x-4 gap-y-2 px-5 py-3.5">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="text-sm font-[600]">{repo.name}</span>
@@ -120,22 +122,37 @@ function RepoRow({ repo }: { repo: RepoDTO }) {
             </a>
           ) : null}
         </div>
-        <p className="mono truncate text-2xs text-dust">{repo.localPath}</p>
-        <p className="mt-0.5 text-2xs text-dust">
-          {repo.summary?.languages.slice(0, 3).join(', ') || 'Unknown stack'}, branch <span className="mono">{repo.defaultBranch}</span>,{' '}
-          {enabled.length ? `${enabled.length} check${enabled.length > 1 ? 's' : ''}` : <span className="text-signal-deep">no checks configured</span>}
+        <p className="mono truncate text-2xs text-dust" title={repo.localPath}>
+          {repo.localPath}
         </p>
+        <p className="mt-0.5 text-2xs text-dust">{facts.join(' · ')}</p>
       </div>
-      <label className="flex items-center gap-2 text-xs text-dust">
-        Orbit may change this
-        <Switch checked={repo.allowModify} onCheckedChange={(v) => toggle.mutate(v)} label={`Allow Orbit to change ${repo.name}`} />
-      </label>
-      <Button size="sm" onClick={() => setEditing(true)}>
-        <ListChecks className="size-3.5" /> Checks
-      </Button>
-      <Button size="icon" variant="ghost" aria-label={`Disconnect ${repo.name}`} loading={remove.isPending} onClick={() => remove.mutate(undefined)}>
-        <Trash2 className="size-4" />
-      </Button>
+      {confirm ? (
+        <span className="flex flex-wrap items-center gap-2 text-xs">
+          Remove from Orbit? The folder stays on your computer.
+          <Button size="sm" variant="danger" loading={remove.isPending} onClick={() => remove.mutate(undefined)}>
+            Remove
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => setConfirm(false)}>
+            Keep
+          </Button>
+        </span>
+      ) : (
+        <>
+          <label className="flex items-center gap-2 text-xs text-dust" title="Off: the AI can read this project and answer questions, but never changes a file.">
+            AI may edit files
+            <Switch checked={repo.allowModify} onCheckedChange={(v) => toggle.mutate(v)} label={`Let the AI edit files in ${repo.name}`} />
+          </label>
+          {repo.isGit ? (
+            <Button size="sm" variant="ghost" onClick={() => setEditing(true)} title="The commands Autopilot runs to test its work">
+              <ListChecks className="size-3.5" /> Checks
+            </Button>
+          ) : null}
+          <Button size="icon" variant="ghost" aria-label={`Remove ${repo.name} from Orbit`} title="Remove from Orbit" onClick={() => setConfirm(true)}>
+            <Trash2 className="size-4" />
+          </Button>
+        </>
+      )}
       {editing ? <RepoDialog repo={repo} open={editing} onOpenChange={setEditing} /> : null}
     </li>
   );
@@ -146,38 +163,38 @@ export function AddRepoDialog({ open, onOpenChange }: { open: boolean; onOpenCha
   const [root, setRoot] = useState('');
   const [found, setFound] = useState<{ path: string; name: string; connectedRepoId: string | null }[] | null>(null);
   const [gh, setGh] = useState<{ nameWithOwner: string; description: string | null; visibility: string; connectedRepoId: string | null }[] | null>(null);
-  const add = useAction((p: string) => post<RepoDTO>('/api/repos', { path: p }), { success: (r) => `Connected ${r.name}`, invalidate: [keys.repos, keys.overview] });
+  const add = useAction((p: string) => post<RepoDTO>('/api/repos', { path: p }), { success: (r) => `Added ${r.name}`, invalidate: [keys.repos, keys.overview] });
   const scan = useAction((r: string) => post<typeof found>('/api/repos/scan', { root: r }), {});
   const listGh = useAction(() => api<NonNullable<typeof gh>>('/api/repos/github'), {});
-  const clone = useAction((n: string) => post<RepoDTO>('/api/repos/clone', { nameWithOwner: n }), { success: (r) => `Cloned and connected ${r.name}`, invalidate: [keys.repos, keys.overview] });
+  const clone = useAction((n: string) => post<RepoDTO>('/api/repos/clone', { nameWithOwner: n }), { success: (r) => `Downloaded and added ${r.name}`, invalidate: [keys.repos, keys.overview] });
   return (
-    <Dialog open={open} onOpenChange={onOpenChange} wide title="Connect a repository" description="Orbit reads it and creates isolated worktrees for missions. Your checkout and default branch are never modified.">
+    <Dialog open={open} onOpenChange={onOpenChange} wide title="Add a project" description="Any folder on this computer. Orbit only works in the folders you add, and only when you ask.">
       <Tabs defaultValue="local">
         <TabsList className="-mx-6 mb-5 px-5">
-          <TabsTrigger value="local">Local folder</TabsTrigger>
-          <TabsTrigger value="scan">Scan a folder</TabsTrigger>
-          <TabsTrigger value="github">Clone from GitHub</TabsTrigger>
+          <TabsTrigger value="local">A folder</TabsTrigger>
+          <TabsTrigger value="scan">Find my projects</TabsTrigger>
+          <TabsTrigger value="github">From GitHub</TabsTrigger>
         </TabsList>
         <TabsContent value="local" className="space-y-3">
-          <Field label="Repository path" hint="The folder that contains .git.">
-            <Input className="mono" value={path} onChange={(e) => setPath(e.target.value)} placeholder="C:\\code\\my-app or ~/code/my-app" />
+          <Field label="Folder path" hint="Tip: open the folder in File Explorer, click the address bar and copy what it shows.">
+            <Input className="mono" value={path} onChange={(e) => setPath(e.target.value)} placeholder={'C:\\Users\\you\\Documents\\my-project'} />
           </Field>
           <Button variant="primary" loading={add.isPending} disabled={!path.trim()} onClick={() => add.mutate(path, { onSuccess: () => setPath('') })}>
-            Connect repository
+            Add project
           </Button>
         </TabsContent>
         <TabsContent value="scan" className="space-y-3">
-          <Field label="Folder to scan" hint="Looks at this folder and its direct subfolders only, never deeper.">
+          <Field label="Where do you keep your projects?" hint="Orbit lists the Git projects in this folder and the folders directly inside it, never deeper.">
             <div className="flex gap-2">
               <Input className="mono" value={root} onChange={(e) => setRoot(e.target.value)} placeholder="C:\\code" />
               <Button loading={scan.isPending} disabled={!root.trim()} onClick={() => scan.mutate(root, { onSuccess: (r) => setFound(r) })}>
-                Scan
+                Look
               </Button>
             </div>
           </Field>
           {found ? (
             found.length === 0 ? (
-              <p className="text-sm text-dust">No git repositories found there.</p>
+              <p className="text-sm text-dust">No Git projects found there. A plain folder can be added by its path.</p>
             ) : (
               <ul className="divide-y divide-seam rounded-[10px] border border-seam">
                 {found.map((f) => (
@@ -187,10 +204,10 @@ export function AddRepoDialog({ open, onOpenChange }: { open: boolean; onOpenCha
                       <p className="mono truncate text-2xs text-dust">{f.path}</p>
                     </div>
                     {f.connectedRepoId ? (
-                      <span className="text-xs text-go">Connected</span>
+                      <span className="text-xs text-go">Added</span>
                     ) : (
                       <Button size="sm" onClick={() => add.mutate(f.path, { onSuccess: () => setFound(found.map((x) => (x.path === f.path ? { ...x, connectedRepoId: 'yes' } : x))) })}>
-                        Connect
+                        Add
                       </Button>
                     )}
                   </li>
@@ -201,11 +218,11 @@ export function AddRepoDialog({ open, onOpenChange }: { open: boolean; onOpenCha
         </TabsContent>
         <TabsContent value="github" className="space-y-3">
           <p className="text-sm text-dust">
-            Uses your <Code>gh</Code> login. Cloned repositories go into Orbit&apos;s data folder.
+            Orbit downloads a copy with your GitHub login and keeps it in its own data folder.
           </p>
           {!gh ? (
             <Button loading={listGh.isPending} onClick={() => listGh.mutate(undefined, { onSuccess: (r) => setGh(r) })}>
-              List my GitHub repositories
+              Show my GitHub projects
             </Button>
           ) : (
             <ul className="max-h-80 divide-y divide-seam overflow-y-auto rounded-[10px] border border-seam">
@@ -218,10 +235,10 @@ export function AddRepoDialog({ open, onOpenChange }: { open: boolean; onOpenCha
                     {r.description ? <p className="truncate text-2xs text-dust">{r.description}</p> : null}
                   </div>
                   {r.connectedRepoId ? (
-                    <span className="text-xs text-go">Connected</span>
+                    <span className="text-xs text-go">Added</span>
                   ) : (
                     <Button size="sm" loading={clone.isPending && clone.variables === r.nameWithOwner} onClick={() => clone.mutate(r.nameWithOwner, { onSuccess: () => setGh(gh.map((x) => (x.nameWithOwner === r.nameWithOwner ? { ...x, connectedRepoId: 'yes' } : x))) })}>
-                      Clone
+                      Download
                     </Button>
                   )}
                 </li>
@@ -240,16 +257,16 @@ export function AddRepoDialog({ open, onOpenChange }: { open: boolean; onOpenCha
 
 function MappingDialog({ project, repos, open, onOpenChange }: { project: ExternalProjectDTO; repos: RepoDTO[]; open: boolean; onOpenChange: (o: boolean) => void }) {
   const [chosen, setChosen] = useState(project.repoIds);
-  const save = useAction(() => patch(`/api/projects/${project.id}`, { repoIds: chosen }), { success: 'Mapping saved', invalidate: [keys.projects, keys.repos] });
+  const save = useAction(() => patch(`/api/projects/${project.id}`, { repoIds: chosen }), { success: 'Saved', invalidate: [keys.projects, keys.repos] });
   return (
     <Dialog
       open={open}
       onOpenChange={onOpenChange}
-      title={`Repositories for ${project.name}`}
-      description="Missions from this project may only change these repositories. When several are mapped, the planner proposes which ones a task needs and you confirm."
+      title={`Projects for ${project.name}`}
+      description="Tasks from this Asana project may only change the projects you tick. With several, the planner suggests which ones a task needs and you confirm."
       footer={
         <Button variant="primary" loading={save.isPending} onClick={() => save.mutate(undefined, { onSuccess: () => onOpenChange(false) })}>
-          Save mapping
+          Save
         </Button>
       }
     >
@@ -259,7 +276,7 @@ function MappingDialog({ project, repos, open, onOpenChange }: { project: Extern
 }
 
 export function RepoPicker({ repos, chosen, onChange }: { repos: RepoDTO[]; chosen: string[]; onChange: (ids: string[]) => void }) {
-  if (repos.length === 0) return <p className="text-sm text-dust">Connect a repository first.</p>;
+  if (repos.length === 0) return <p className="text-sm text-dust">Add a project first.</p>;
   return (
     <ul className="divide-y divide-seam rounded-[10px] border border-seam">
       {repos.map((r) => (
@@ -282,7 +299,7 @@ function TaskList({ project }: { project: ExternalProjectDTO }) {
     success: (r) => {
       const ok = r.filter((x) => x.missionId).length;
       const failed = r.filter((x) => x.error).length;
-      return `${ok} mission${ok === 1 ? '' : 's'} started${failed ? `, ${failed} failed` : ''}`;
+      return `${ok} ${ok === 1 ? 'task' : 'tasks'} started${failed ? `, ${failed} failed` : ''}`;
     },
     invalidate: [keys.projectTasks(project.id), ['missions'], keys.overview],
   });
@@ -329,7 +346,7 @@ function ProjectRow({ project, repos }: { project: ExternalProjectDTO; repos: Re
     success: (r) => (r.error ? `Check failed: ${r.error}` : r.triggers ? `Found ${r.triggers} new /orbit command(s)` : 'No new /orbit commands'),
     invalidate: [keys.projects, ['missions']],
   });
-  const remove = useAction(() => del(`/api/projects/${project.id}`), { success: 'Project disconnected', invalidate: [keys.projects] });
+  const remove = useAction(() => del(`/api/projects/${project.id}`), { success: 'Asana project disconnected', invalidate: [keys.projects] });
   const mapped = repos.filter((r) => project.repoIds.includes(r.id));
   return (
     <li>
@@ -344,7 +361,7 @@ function ProjectRow({ project, repos }: { project: ExternalProjectDTO; repos: Re
             ) : null}
           </div>
           <p className="text-2xs text-dust">
-            {mapped.length ? `Maps to ${mapped.map((r) => r.name).join(', ')}` : <span className="text-signal-deep">No repository mapped yet</span>}
+            {mapped.length ? `Works in ${mapped.map((r) => r.name).join(', ')}` : <span className="text-signal-deep">Choose its projects first</span>}
             {project.lastPolledAt ? `. Checked ${timeAgo(project.lastPolledAt)}` : '. Not checked yet'}
           </p>
           {project.pollError ? <p className="text-2xs text-fault">{project.pollError}</p> : null}
@@ -354,7 +371,7 @@ function ProjectRow({ project, repos }: { project: ExternalProjectDTO; repos: Re
           <Switch checked={project.triggersEnabled} onCheckedChange={(v) => toggle.mutate(v)} label="Listen for /orbit run comments" />
         </label>
         <Button size="sm" onClick={() => setMapping(true)}>
-          Repositories
+          Projects
         </Button>
         <Button size="sm" onClick={() => setShowTasks((s) => !s)} aria-expanded={showTasks}>
           {showTasks ? 'Hide tasks' : 'Run ready tasks'}
@@ -429,7 +446,7 @@ export function ConnectProjectDialog({ integrationId, repos, open, onOpenChange 
             </ul>
           )}
         </Field>
-        <Field label="Repositories this project's tasks may change">
+        <Field label="Projects its tasks may change">
           <RepoPicker repos={repos} chosen={chosen} onChange={setChosen} />
         </Field>
       </div>
@@ -446,44 +463,66 @@ export function ProjectsPage() {
   const asana = integrations.data?.find((i) => i.provider === 'asana' && i.status === 'connected');
   return (
     <>
-      <PageHeader title="Projects" description="The repositories Orbit may work on, and the Asana projects whose tasks it can turn into pull requests." />
+      <PageHeader
+        title="Projects"
+        description="The folders Orbit can work in. It never looks anywhere else."
+        action={
+          <Button variant="primary" onClick={() => setAdding(true)}>
+            <FolderPlus className="size-4" /> Add a project
+          </Button>
+        }
+      />
       <div className="space-y-6">
         <Panel>
-          <PanelHeader
-            title="Repositories"
-            description="Missions work in isolated git worktrees and never touch your checkout or default branch."
-            action={
-              <Button size="sm" variant="primary" onClick={() => setAdding(true)}>
-                <FolderPlus className="size-3.5" /> Connect repository
-              </Button>
-            }
-          />
-          {repos.isPending ? <Loading /> : repos.data?.length ? <ul className="divide-y divide-seam">{repos.data.map((r) => <RepoRow key={r.id} repo={r} />)}</ul> : <Empty title="No repositories yet.">Connect one to run your first mission.</Empty>}
-        </Panel>
-        <Panel>
-          <PanelHeader
-            title="Asana projects"
-            description="Map each project to the repositories its tasks may change."
-            action={
-              asana ? (
-                <Button size="sm" onClick={() => setConnecting(true)}>
-                  <Plus className="size-3.5" /> Connect project
-                </Button>
-              ) : null
-            }
-          />
-          {!asana ? (
-            <Empty title="Asana is not connected." action={<Link to="/integrations"><Button size="sm">Connect Asana</Button></Link>}>
-              Optional. Without it you can still run missions from tasks you type into Orbit or the CLI.
-            </Empty>
-          ) : projects.isPending ? (
-            <Loading />
-          ) : projects.data?.length ? (
-            <ul className="divide-y divide-seam">{projects.data.map((p) => <ProjectRow key={p.id} project={p} repos={repos.data ?? []} />)}</ul>
+          {repos.isPending ? (
+            <Loading label="Loading your projects" />
+          ) : repos.error ? (
+            <div className="p-5">
+              <ErrorNote error={repos.error} />
+            </div>
+          ) : repos.data?.length ? (
+            <ul className="divide-y divide-seam">
+              {repos.data.map((r) => (
+                <RepoRow key={r.id} repo={r} />
+              ))}
+            </ul>
           ) : (
-            <Empty title="No projects connected.">Connect one to run its tasks with Orbit or by commenting /orbit run.</Empty>
+            <Empty title="No projects yet.">A project is any folder on this computer: code, documents, a website. Add one to start working on it with an AI.</Empty>
           )}
         </Panel>
+
+        {asana ? (
+          <Panel>
+            <PanelHeader
+              title="Asana projects"
+              description="Choose which of your projects each Asana project's tasks may change."
+              action={
+                <Button size="sm" onClick={() => setConnecting(true)}>
+                  <Plus className="size-3.5" /> Connect an Asana project
+                </Button>
+              }
+            />
+            {projects.isPending ? (
+              <Loading />
+            ) : projects.data?.length ? (
+              <ul className="divide-y divide-seam">
+                {projects.data.map((p) => (
+                  <ProjectRow key={p.id} project={p} repos={repos.data ?? []} />
+                ))}
+              </ul>
+            ) : (
+              <Empty title="No Asana projects connected.">Connect one to run its tasks on Autopilot, from here or by commenting /orbit run on a task.</Empty>
+            )}
+          </Panel>
+        ) : (
+          <p className="px-1 text-sm text-dust">
+            Keep your tasks in Asana?{' '}
+            <Link to="/integrations" className="text-chalk underline decoration-seam-2 underline-offset-4 hover:decoration-chalk">
+              Connect it
+            </Link>{' '}
+            and Autopilot can pick them up.
+          </p>
+        )}
       </div>
       <AddRepoDialog open={adding} onOpenChange={setAdding} />
       {asana && connecting ? <ConnectProjectDialog integrationId={asana.id} repos={repos.data ?? []} open={connecting} onOpenChange={setConnecting} /> : null}

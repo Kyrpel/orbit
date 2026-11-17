@@ -6,6 +6,7 @@ import { execa } from 'execa';
 import { redactSecrets } from '@orbit/shared';
 import { buildAgentEnv } from './env';
 import { outputPreview, unifiedDiff } from './output';
+import { releaseOutputOnExit, stopProcess as stopTree } from './process-tree';
 import { emptyResult, extractJson, imageNote, isUsageLimitError, type AgentEvent, type AgentRunContext, type AgentRunRequest, type AgentRunResult, type AgentRuntime, type RuntimeAvailability } from './runtime';
 
 /*
@@ -153,12 +154,14 @@ export class CursorCliRuntime implements AgentRuntime {
     }
     let temporaryState: string | null = null;
     const controller = new AbortController();
+    let stopProcess = () => controller.abort();
+    let release: () => void = () => undefined;
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      controller.abort();
+      stopProcess();
     }, req.timeoutMs);
-    const onAbort = () => controller.abort();
+    const onAbort = () => stopProcess();
     if (ctx.signal.aborted) controller.abort();
     else ctx.signal.addEventListener('abort', onAbort, { once: true });
 
@@ -187,6 +190,16 @@ export class CursorCliRuntime implements AgentRuntime {
         stdout: 'pipe',
         stderr: 'pipe',
       });
+      let stopping = false;
+      stopProcess = () => {
+        if (stopping) return;
+        stopping = true;
+        // The .cmd launcher starts PowerShell and Node, and Cursor starts tool servers and
+        // commands: stop all of them, not just the launcher.
+        stopTree(sub, controller);
+      };
+      // If something Cursor started keeps its output open, stop reading once Cursor is gone.
+      release = releaseOutputOnExit(sub);
       sub.stderr?.on('data', (d: Buffer) => {
         stderr.push(d.toString());
         if (stderr.length > 60) stderr.shift();
@@ -226,8 +239,9 @@ export class CursorCliRuntime implements AgentRuntime {
       }
       await sub;
     } catch (err) {
-      return emptyResult({ status: timedOut ? 'timeout' : ctx.signal.aborted ? 'cancelled' : 'failed', durationMs: Date.now() - started, sessionId, error: redactSecrets(`${(err as Error).message}\n${stderr.join('').slice(-1500)}`), deniedTools: denied });
+      return emptyResult({ status: timedOut ? 'timeout' : ctx.signal.aborted ? 'cancelled' : 'failed', durationMs: Date.now() - started, sessionId, text: redactSecrets(replyParts.join('\n\n')), error: redactSecrets(`${(err as Error).message}\n${stderr.join('').slice(-1500)}`), deniedTools: denied });
     } finally {
+      release();
       clearTimeout(timer);
       ctx.signal.removeEventListener('abort', onAbort);
       if (temporaryState) rmSync(temporaryState, { recursive: true, force: true });

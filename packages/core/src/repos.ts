@@ -114,7 +114,7 @@ export class RepoService {
   /**
    * Connects a project folder. Nothing in it is modified.
    * - A folder that is its own git repository can be changed by missions.
-   * - Any other folder is connected read-only: agents may read it as a reference.
+   * - Plain folders can be changed in local sessions; missions still need git worktrees.
    * Orbit never silently connects a parent repository, your home folder or a drive.
    */
   async register(inputPath: string, opts: { name?: string; allowModify?: boolean; actor?: string } = {}): Promise<RepoDTO> {
@@ -131,7 +131,7 @@ export class RepoService {
       });
     }
     // Not a repository of its own (or only inside an accidental repository at your home folder):
-    // connect it as a read-only folder that missions can read for context.
+    // connect it for local sessions and as reference material for missions.
     if (!ownRepo) return this.registerFolder(resolved, opts);
 
     const existing = this.ctx.db.select().from(repos).all().find((r) => samePath(r.localPath, top));
@@ -188,10 +188,11 @@ export class RepoService {
     }
   }
 
-  private async registerFolder(folder: string, opts: { name?: string; actor?: string }): Promise<RepoDTO> {
+  private async registerFolder(folder: string, opts: { name?: string; allowModify?: boolean; actor?: string }): Promise<RepoDTO> {
     const existing = this.ctx.db.select().from(repos).all().find((r) => samePath(r.localPath, folder));
     if (existing) throw new OrbitError('CONFLICT', `${existing.name} is already connected.`, { details: { repoId: existing.id } });
     const summary = await summarizeRepository(folder, this.ctx.git);
+    const detected = detectCommands(folder);
     const ts = nowIso(this.ctx);
     const baseName = opts.name?.trim() || path.basename(folder);
     const taken = new Set(this.ctx.db.select({ name: repos.name }).from(repos).all().map((r) => r.name.toLowerCase()));
@@ -207,10 +208,10 @@ export class RepoService {
         githubOwner: null,
         githubRepo: null,
         defaultBranch: '',
-        allowModify: false,
+        allowModify: opts.allowModify ?? true,
         isGit: false,
-        setupCommands: [],
-        verifyCommands: [],
+        setupCommands: detected.setup,
+        verifyCommands: detected.verify,
         summary,
         summaryHeadSha: null,
         summaryUpdatedAt: ts,
@@ -219,7 +220,7 @@ export class RepoService {
       })
       .returning()
       .get();
-    audit(this.ctx, { actor: opts.actor ?? 'user', action: 'repo.connected', target: row.id, summary: `Connected folder ${name} (${folder}) as read-only: it is not a git repository` });
+    audit(this.ctx, { actor: opts.actor ?? 'user', action: 'repo.connected', target: row.id, summary: `Connected folder ${name} (${folder})${row.allowModify ? ' for local sessions' : ' as read-only'}` });
     this.ctx.bus.publish({ type: 'repos.updated' });
     return this.toDTO(row);
   }
@@ -228,11 +229,6 @@ export class RepoService {
     let row = this.getRow(id);
     // A plain folder that has since become a git project (git init, a first commit): use it as one.
     if (!row.isGit && patch.allowModify) row = this.promoteToGit(row);
-    if (!row.isGit && patch.allowModify) {
-      throw new OrbitError('VALIDATION', `${row.name} is a folder without git, so Orbit can only read it.`, {
-        hint: 'To let missions change it, run `git init` there, make a first commit, then reconnect it.',
-      });
-    }
     const setupCommands = validateCommands(patch.setupCommands, 'Setup');
     const verifyCommands = validateCommands(patch.verifyCommands, 'Verification');
     if (patch.name !== undefined && !patch.name.trim()) throw new OrbitError('VALIDATION', 'Name cannot be empty.');

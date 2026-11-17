@@ -42,6 +42,8 @@ const ExecutionSettings = z.object({
   allowAgentNetwork: z.boolean().default(false),
   /** How new working sessions handle commands: ask first, or auto (Claude Code's auto mode). */
   sessionCommands: z.enum(['ask', 'auto']).default('ask'),
+  /** Add follow-ups to the current task; without live input, continue both after a completed step. */
+  sessionFollowUps: z.enum(['send', 'queue']).default('send'),
   /** After each answer, suggest your likely next message (a small, cheap model call), like Claude Code. */
   suggestNext: z.boolean().default(true),
   /**

@@ -1,191 +1,30 @@
-import { AlertTriangle, ArrowUp, Check, ChevronDown, Clock3, Copy, History, Loader2, Maximize2, Plus, RotateCcw, ShieldCheck, SlidersHorizontal, Square, Trash2, Wand2, X, Zap } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { AlertTriangle, ArrowUp, Check, Clock3, Copy, History, Loader2, Maximize2, Plus, RotateCcw, ShieldCheck, Square, Trash2, Wand2, X, Zap } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
-import type { ChatEventDTO, ChatImageInput, ChatMessageDTO, ConversationDetailDTO, ConversationSummaryDTO, RepoDTO, SessionApprovalDTO, SessionMode, SessionPermissionMode } from '@orbit/shared';
-import { EFFORT_INFO, EFFORT_LEVELS, effortLevelsFor, formatDuration, modelProvider, type EffortLevel } from '@orbit/shared';
+import type { ChatEventDTO, ChatImageInput, ChatMessageDTO, ConversationDetailDTO, ConversationSummaryDTO, RepoDTO, SessionApprovalDTO, SessionPermissionMode } from '@orbit/shared';
+import { formatDuration, type EffortLevel } from '@orbit/shared';
 import { buildLiveModel, type LiveRun, type LiveStep } from '../lib/live-steps';
-import { del, keys, patch, post, useAction, useAgents, useChat, useChats, useSettings, useTeam } from '../lib/api';
+import { del, keys, patch, post, useAction, useAgents, useChanges, useChat, useChats, useSettings } from '../lib/api';
 import { tabs, type WorkspaceTab } from '../lib/tabs';
 import { planAwaitingApproval } from '../lib/usage';
-import { cn, timeAgo } from '../lib/utils';
+import { cn, shortPath, timeAgo } from '../lib/utils';
 import { ChangesPanel } from './changes-panel';
+import { LampDot, type Lamp } from './lamp';
 import { KIND_ICON, Plan, since, useTick } from './live-steps';
 import { Markdown } from './markdown';
 import { PastText } from './past-chip';
-import { cursorReady, huggingFaceReady, modelChoices, modePatch, openRouterReady, promptMode, type SessionAi, SHORTCUTS, takeDraft, useMenuKeys, usePrompt, useRepoActions, type MenuKind, type PromptMenu, type PromptMode, type PromptOptions } from './prompt';
+import { MODE_CHOICES, modePatch, promptMode, SHORTCUTS, takeDraft, useMenuKeys, usePrompt, useRepoActions, type MenuKind, type PromptMenu, type PromptMode, type PromptOptions, type PromptState } from './prompt';
 import { NewMissionDialog } from './new-mission';
 import { modelLabel, PROVIDER_NAME, PROVIDER_TEXT, providerOfRuntime } from './provider';
 import { Button, ErrorNote, Loading } from './ui';
 
 type Provider = ConversationSummaryDTO['provider'];
 
-// ---------------------------------------------------------------------------
-// Small controls
-// ---------------------------------------------------------------------------
-
-/** Which AI works in this tab. */
-export function ProviderSwitch({ value, onChange, disabled }: { value: Provider; onChange: (p: Provider) => void; disabled?: boolean }) {
-  const team = useTeam();
-  const options: { value: Provider; label: string }[] = [
-    { value: 'auto', label: 'Auto' },
-    { value: 'claude', label: 'Claude' },
-    { value: 'codex', label: 'Codex' },
-    // OpenRouter shows once you connected it on the Agents page.
-    ...(openRouterReady(team.data) || value === 'openrouter' ? [{ value: 'openrouter' as const, label: 'OpenRouter' }] : []),
-    // Hugging Face shows once you have an endpoint (Agents page).
-    ...(huggingFaceReady(team.data) || value === 'huggingface' ? [{ value: 'huggingface' as const, label: 'Hugging Face' }] : []),
-    // Cursor shows once its CLI is installed and signed in.
-    ...(cursorReady(team.data) || value === 'cursor' ? [{ value: 'cursor' as const, label: 'Cursor' }] : []),
-  ];
-  return (
-    <div className="inline-flex items-center gap-1.5">
-    <span className="text-2xs text-dust">AI</span>
-    <div className="inline-flex rounded-[10px] bg-hull-2 p-0.5" role="radiogroup" aria-label="Which AI works here">
-      {options.map((o) => (
-        <button
-          key={o.value}
-          type="button"
-          role="radio"
-          aria-checked={value === o.value}
-          disabled={disabled}
-          onClick={() => onChange(o.value)}
-          className={cn(
-            'flex h-7 items-center gap-1.5 rounded-[8px] px-2.5 text-xs transition-colors disabled:opacity-50',
-            value === o.value ? 'bg-hull font-[600] text-chalk shadow-[0_1px_2px_rgb(16_24_40/0.1)]' : 'text-dust hover:text-chalk',
-          )}
-        >
-          {o.value !== 'auto' ? <span className={cn('size-1.5 rounded-full bg-current', PROVIDER_TEXT[o.value])} aria-hidden /> : null}
-          {o.label}
-        </button>
-      ))}
-    </div>
-    </div>
-  );
-}
-
-function ModeSwitch({ value, onChange, canEdit }: { value: SessionMode; onChange: (m: SessionMode) => void; canEdit: boolean }) {
-  return (
-    <div className="inline-flex rounded-[10px] bg-hull-2 p-0.5" role="radiogroup" aria-label="What the AI may do">
-      {(
-        [
-          { value: 'edit', label: 'Can change files' },
-          { value: 'ask', label: 'Only answers questions' },
-        ] as const
-      ).map((o) => (
-        <button
-          key={o.value}
-          type="button"
-          role="radio"
-          aria-checked={value === o.value}
-          disabled={o.value === 'edit' && !canEdit}
-          title={o.value === 'edit' && !canEdit ? 'This project is read-only in Orbit (change that in Projects).' : undefined}
-          onClick={() => onChange(o.value)}
-          className={cn(
-            'h-7 rounded-[8px] px-2.5 text-xs transition-colors disabled:opacity-40',
-            value === o.value ? 'bg-hull font-[600] text-chalk shadow-[0_1px_2px_rgb(16_24_40/0.1)]' : 'text-dust hover:text-chalk',
-          )}
-        >
-          {o.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-/** How commands are handled in a working session, like Shift+Tab in Claude Code. */
-export function CommandsSwitch({ value, onChange, provider }: { value: SessionPermissionMode; onChange: (m: SessionPermissionMode) => void; provider: Provider }) {
-  const codex = provider === 'codex';
-  const options: { value: SessionPermissionMode; label: string; hint: string }[] = [
-    { value: 'ask', label: 'Ask first', hint: 'The agent asks before running any command that changes things. You click Allow.' },
-    {
-      value: 'auto',
-      label: 'Auto-accept',
-      hint: "Commands run on their own, like Claude Code's auto mode. A safety check still blocks risky ones, and agents can never push, commit or read secret files.",
-    },
-    { value: 'plan', label: 'Plan', hint: 'The agent only reads and proposes a plan. Nothing changes until you approve it.' },
-  ];
-  return (
-    <div className="inline-flex items-center gap-1.5" title={codex ? 'Codex always runs commands inside its own sandbox (no network, no git writes), whichever you pick.' : undefined}>
-      <span className="text-2xs text-dust">Commands</span>
-      <div className="inline-flex rounded-[10px] bg-hull-2 p-0.5" role="radiogroup" aria-label="How commands are handled">
-        {options.map((o) => (
-          <button
-            key={o.value}
-            type="button"
-            role="radio"
-            aria-checked={value === o.value}
-            title={o.hint}
-            onClick={() => onChange(o.value)}
-            className={cn(
-              'h-7 rounded-[8px] px-2.5 text-xs transition-colors',
-              value === o.value ? (o.value === 'auto' ? 'bg-telemetry font-[600] text-hull shadow-[0_1px_2px_rgb(16_24_40/0.15)]' : 'bg-hull font-[600] text-chalk shadow-[0_1px_2px_rgb(16_24_40/0.1)]') : 'text-dust hover:text-chalk',
-            )}
-          >
-            {o.label}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-/** Which model this tab uses. "Default" is the session agent's model for that AI (Agents page). */
-export function ModelPicker({ provider, value, onChange }: { provider: Provider; value: string | null; onChange: (m: string | null) => void }) {
-  const team = useTeam();
-  const agents = useAgents();
-  const seat = agents.data?.find((a) => a.role === 'assistant');
-  const ai: SessionAi = provider === 'auto' ? (seat?.resolved.provider === 'codex' ? 'codex' : 'claude') : provider;
-  const list = modelChoices(team.data, ai);
-  const fallback = ai === 'openrouter' || ai === 'huggingface' || ai === 'cursor' ? list[0]?.id : ai === 'codex' ? seat?.codexModel : seat?.model;
-  const fits = (m: string | null | undefined) => !!m && modelProvider(m) === ai;
-  const current = fits(value) ? value! : '';
-  const name = (m: string | null | undefined) => (m ? (list.find((x) => x.id === m)?.label ?? modelLabel(m) ?? m).replace(/^Claude /, '') : null);
-  return (
-    <label className="inline-flex items-center gap-1.5 text-2xs text-dust">
-      Model
-      <select
-        value={current}
-        onChange={(e) => onChange(e.target.value || null)}
-        aria-label="Model for this session"
-        title="Applies to this session only. Change the default on the Agents page (Session agent)."
-        className="h-8 max-w-[180px] rounded-[8px] border border-seam bg-hull px-2 text-xs text-chalk"
-      >
-        <option value="">Default ({name(fallback) ?? (ai === 'codex' ? 'Codex setting' : ai === 'openrouter' ? 'add a model on the Agents page' : ai === 'huggingface' ? 'create an endpoint on the Agents page' : ai === 'cursor' ? 'pick models on the Agents page' : 'agent setting')})</option>
-        {list.map((m) => (
-          <option key={m.id} value={m.id}>
-            {m.label.replace(/^Claude /, '')}
-          </option>
-        ))}
-        {current && !list.some((m) => m.id === current) ? <option value={current}>{current}</option> : null}
-      </select>
-    </label>
-  );
-}
-
-/** How hard this tab's agent thinks. "Default" is the session agent's effort (Agents page). */
-export function EffortPicker({ value, onChange, levels = EFFORT_LEVELS }: { value: EffortLevel | null; onChange: (e: EffortLevel | null) => void; levels?: readonly EffortLevel[] }) {
-  const agents = useAgents();
-  const fallback = agents.data?.find((a) => a.role === 'assistant')?.effort;
-  return (
-    <label className="inline-flex items-center gap-1.5 text-2xs text-dust">
-      Effort
-      <select
-        value={value ?? ''}
-        onChange={(e) => onChange((e.target.value || null) as EffortLevel | null)}
-        aria-label="Reasoning effort for this session"
-        title={value ? EFFORT_INFO[value].description : 'Higher effort thinks longer and uses more tokens. Applies to this session only.'}
-        className="h-8 rounded-[8px] border border-seam bg-hull px-2 text-xs text-chalk"
-      >
-        <option value="">Default ({fallback ? EFFORT_INFO[fallback].label : 'agent setting'})</option>
-        {levels.map((l) => (
-          <option key={l} value={l} title={EFFORT_INFO[l].description}>
-            {EFFORT_INFO[l].label}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
+/*
+  The Light look of a workspace pane. It works the way the terminal look does, drawn in
+  white: the transcript, the message box, and under the box one quiet line that says what
+  the AI may do (left) and which AI answers (right). Click either to change it.
+*/
 
 function aiName(runtime: string | null | undefined, seat?: ConversationSummaryDTO['seat'], model?: string | null): { name: string; text: string } {
   if (seat === 'security') return { name: 'Security reviewer', text: 'text-chalk' };
@@ -245,17 +84,65 @@ function LightMenu({ menu, autoFocus }: { menu: PromptMenu; autoFocus: boolean }
   );
 }
 
+/** What each mode means in a few words. The full choice is one click (or Shift+Tab) away. */
+const MODE_NOTE: Record<PromptMode, string> = {
+  'ask-first': 'asks before running commands',
+  auto: 'runs commands on its own',
+  plan: 'proposes a plan, changes nothing',
+  'read-only': 'reads and answers, changes nothing',
+};
+
+/** Under the message box, as in the terminal look: the mode on the left, the AI on the right. */
+function StatusLine({ p, prompt }: { p: PromptState; prompt: PromptOptions }) {
+  const fixed = prompt.security ? 'Read-only security check' : !prompt.canEdit ? 'Read-only project' : null;
+  const label = MODE_CHOICES.find((m) => m.mode === prompt.mode)?.label ?? 'Ask first';
+  const quiet = 'rounded-[6px] px-1.5 py-0.5 transition-colors hover:bg-hull-2 hover:text-chalk';
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-x-3 px-1 text-2xs text-dust">
+      {fixed ? (
+        <span className="px-1.5 py-0.5">{fixed}</span>
+      ) : (
+        <button type="button" onClick={() => p.openMenu('mode')} className={cn(quiet, 'text-left')} title="Change what the AI may do (Shift+Tab)">
+          <span className={cn('font-[600]', prompt.mode === 'auto' ? 'text-telemetry' : 'text-chalk')}>{label}</span>
+          <span className="hidden @md:inline"> · {MODE_NOTE[prompt.mode]}</span>
+        </button>
+      )}
+      {!prompt.security ? (
+        <span className="flex min-w-0 flex-wrap items-center">
+          <button type="button" onClick={() => p.openMenu('ai')} className={quiet} title="Which AI answers (/ai)">
+            {p.status.aiText}
+          </button>
+          <span aria-hidden>·</span>
+          <button type="button" onClick={() => p.openMenu('model')} className={quiet} title="Model for this session (/model)">
+            {p.status.modelText}
+          </button>
+          {p.status.effortText ? (
+            <>
+              <span aria-hidden>·</span>
+              <button type="button" onClick={() => p.openMenu('effort')} className={quiet} title="How hard the AI thinks (/effort)">
+                {p.status.effortText}
+              </button>
+            </>
+          ) : null}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+const POPUP = 'rounded-[12px] border border-seam bg-hull shadow-[0_12px_32px_-18px_rgb(16_24_40/0.35)]';
+
 /** The message box: type, paste images or long text, `/` for commands, Shift+Tab to change mode. */
-export function Composer({ prompt, placeholder, steerable, big, autoFocus = true }: { prompt: PromptOptions; placeholder: string; steerable?: boolean; big?: boolean; autoFocus?: boolean }) {
+export function Composer({ prompt, placeholder, steerable, queueFollowUps = false, big, autoFocus = true }: { prompt: PromptOptions; placeholder: string; steerable?: boolean; queueFollowUps?: boolean; big?: boolean; autoFocus?: boolean }) {
   const p = usePrompt(prompt);
   const { running, sending, onStop, value } = prompt;
   const menu = p.picker ?? p.proposalMenu;
   const empty = !value.trim() && !p.images.length;
   return (
-    <div className="space-y-2">
+    <div className="@container space-y-1.5">
       {menu ? <LightMenu menu={menu} autoFocus={autoFocus} /> : null}
       {!menu && p.files.length ? (
-        <div className="rounded-[14px] border border-seam bg-hull p-1.5 shadow-[0_12px_32px_-18px_rgb(16_24_40/0.35)]" role="listbox" aria-label="Files">
+        <div className={cn(POPUP, 'p-1.5')} role="listbox" aria-label="Files">
           {p.files.map((path, i) => (
             <button
               key={path}
@@ -270,11 +157,11 @@ export function Composer({ prompt, placeholder, steerable, big, autoFocus = true
               <span className="truncate">@{path}</span>
             </button>
           ))}
-          <p className="px-2.5 pb-0.5 pt-1 text-2xs text-dust-2">↑↓ to choose · Enter or Tab to insert · Esc to close</p>
+          <p className="px-2.5 pb-0.5 pt-1 text-2xs text-dust">↑↓ to choose · Enter or Tab to insert · Esc to close</p>
         </div>
       ) : null}
       {!menu && p.suggestions.length ? (
-        <div className="rounded-[14px] border border-seam bg-hull p-1.5 shadow-[0_12px_32px_-18px_rgb(16_24_40/0.35)]" role="listbox" aria-label="Commands">
+        <div className={cn(POPUP, 'p-1.5')} role="listbox" aria-label="Commands">
           {p.suggestions.slice(p.windowStart, p.windowStart + 8).map((c, n) => {
             const i = p.windowStart + n;
             return (
@@ -292,11 +179,11 @@ export function Composer({ prompt, placeholder, steerable, big, autoFocus = true
               </button>
             );
           })}
-          <p className="px-2.5 pb-0.5 pt-1 text-2xs text-dust-2">↑↓ to choose · Enter to run · Tab to complete</p>
+          <p className="px-2.5 pb-0.5 pt-1 text-2xs text-dust">↑↓ to choose · Enter to run · Tab to complete</p>
         </div>
       ) : null}
       {!menu && !p.suggestions.length && p.help ? (
-        <div className="rounded-[14px] border border-seam bg-hull p-3 text-xs shadow-[0_12px_32px_-18px_rgb(16_24_40/0.35)]">
+        <div className={cn(POPUP, 'p-3 text-xs')}>
           <p className="text-sm font-[650]">Shortcuts</p>
           <ul className="mt-1.5 grid grid-cols-1 gap-x-6 gap-y-1 text-dust sm:grid-cols-2">
             {SHORTCUTS.map((x) => (
@@ -317,14 +204,7 @@ export function Composer({ prompt, placeholder, steerable, big, autoFocus = true
       {p.notice ? <p className="px-1 text-xs text-signal-deep">{p.notice}</p> : null}
       {p.info ? <p className="whitespace-pre-line px-1 text-xs text-dust">{p.info.join('\n')}</p> : null}
       {p.shellMode ? <p className="px-1 text-xs text-dust">Runs this command in the project right now. The agent hears about it with your next message.</p> : null}
-      <div
-        {...p.dropProps}
-        className={cn(
-          'rounded-[16px] border bg-hull shadow-[0_1px_2px_rgb(16_24_40/0.05)] transition-colors focus-within:border-telemetry/70 focus-within:shadow-[0_0_0_3px_rgb(11_124_113/0.12)]',
-          p.dragging ? 'border-telemetry bg-telemetry/[0.04]' : 'border-seam-2',
-          big && 'rounded-[18px]',
-        )}
-      >
+      <div {...p.dropProps} className={cn('rounded-[14px] border bg-hull transition-colors focus-within:border-telemetry', p.dragging ? 'border-telemetry bg-telemetry/[0.04]' : 'border-seam-2')}>
         {p.images.length ? (
           <div className="flex flex-wrap gap-2 px-3 pt-3">
             {p.images.map((img) => (
@@ -349,24 +229,21 @@ export function Composer({ prompt, placeholder, steerable, big, autoFocus = true
           placeholder={p.dragging ? 'Drop the image to attach it' : (p.ghost ?? placeholder)}
           aria-label="Your message"
           autoFocus={autoFocus}
-          className={cn('block max-h-64 w-full resize-none bg-transparent px-4 pt-3 text-chalk outline-none placeholder:text-dust-2', big ? 'min-h-[84px] text-base' : 'min-h-[28px] text-[14.5px]')}
+          className={cn('block max-h-64 w-full resize-none bg-transparent px-4 pt-3 text-chalk outline-none placeholder:text-dust', big ? 'min-h-[84px] text-base' : 'min-h-[28px] text-[14.5px]')}
         />
         <div className="flex items-center justify-between gap-2 px-2.5 pb-2.5 pt-1">
           <button
             type="button"
             onClick={p.improve}
             disabled={!value.trim() || p.improving}
-            className="inline-flex h-8 items-center gap-1.5 rounded-[8px] px-2.5 text-xs text-dust transition-colors hover:bg-hull-2 hover:text-chalk disabled:opacity-40"
+            className="inline-flex h-8 items-center gap-1.5 rounded-[8px] px-2.5 text-xs text-dust transition-colors hover:bg-hull-2 hover:text-chalk disabled:opacity-50"
             title="Let the Prompt engineer turn your message into a clear, complete request (/improve)"
           >
             {p.improving ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : <Wand2 className="size-3.5" aria-hidden />}
             {p.improving ? 'Improving…' : 'Improve'}
           </button>
           <span className="flex items-center gap-2">
-            <span className="hidden text-2xs text-dust-2 md:inline">
-              {p.ghost ? 'Tab to use the suggestion · ' : ''}
-              {running && onStop && !steerable ? 'Enter to queue' : 'Enter to send'} · / for commands · ? for shortcuts
-            </span>
+            <span className="hidden text-2xs text-dust @lg:inline">{p.ghost ? 'Tab to use the suggestion' : running && onStop ? queueFollowUps ? 'Enter queues it for later' : 'Enter adds to the current task' : '/ for commands · ? for help'}</span>
             {running && onStop ? (
               <>
                 <Button size="sm" variant="ghost" onClick={onStop} aria-label="Stop the agent" title="Stop (Esc)">
@@ -375,8 +252,8 @@ export function Composer({ prompt, placeholder, steerable, big, autoFocus = true
                 <Button size="sm" onClick={() => p.submit(true)} disabled={empty || sending} title="Interrupt the agent and send this right away (Ctrl+Enter)">
                   <Zap className="size-3.5" /> Send now
                 </Button>
-                {steerable ? (
-                  <Button size="sm" variant="primary" onClick={() => p.submit(false)} disabled={empty || sending} title="The agent reads it at its next step, without stopping">
+                {!queueFollowUps ? (
+                  <Button size="sm" variant="primary" onClick={() => p.submit(false)} disabled={empty || sending} title={steerable ? 'Add to the current task without stopping' : 'Add to the current task at the next completed step'}>
                     {sending ? <Loader2 className="size-4 animate-spin" /> : <ArrowUp className="size-3.5" />} Send
                   </Button>
                 ) : (
@@ -393,6 +270,7 @@ export function Composer({ prompt, placeholder, steerable, big, autoFocus = true
           </span>
         </div>
       </div>
+      <StatusLine p={p} prompt={prompt} />
     </div>
   );
 }
@@ -728,7 +606,7 @@ function Transcript({
               </div>
               {m.status === 'queued' ? (
                 <span className="flex items-center gap-1.5 text-2xs text-dust">
-                  <Clock3 className="size-3" aria-hidden /> Queued, sends when the agent finishes
+                  <Clock3 className="size-3" aria-hidden /> Waiting to send
                   <button type="button" onClick={() => onUnqueue(m.id)} className="grid size-5 place-items-center rounded-[6px] hover:bg-hull-2 hover:text-chalk" aria-label="Remove this queued message" title="Remove">
                     <X className="size-3" />
                   </button>
@@ -770,37 +648,37 @@ function Transcript({
 }
 
 // ---------------------------------------------------------------------------
-// Session header: project, AI, mode, other sessions
+// Pane header: the project, and this project's other sessions
 // ---------------------------------------------------------------------------
 
-function SessionsMenu({ repo, tab, current, compact }: { repo: RepoDTO; tab: WorkspaceTab; current: string | null; compact?: boolean }) {
+function SessionsMenu({ repo, tab, current, compact, onDelete }: { repo: RepoDTO; tab: WorkspaceTab; current: string | null; compact?: boolean; onDelete?: () => void }) {
   const chats = useChats();
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
     const close = (e: MouseEvent) => !box.current?.contains(e.target as Node) && setOpen(false);
+    const esc = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false);
     document.addEventListener('mousedown', close);
-    return () => document.removeEventListener('mousedown', close);
+    document.addEventListener('keydown', esc);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('keydown', esc);
+    };
   }, [open]);
   const mine = (chats.data ?? []).filter((c) => c.repoIds.length === 1 && c.repoIds[0] === repo.id);
+  const item = 'flex h-9 w-full items-center gap-2 rounded-[8px] px-2.5 text-sm hover:bg-hull-2';
   return (
     <div ref={box} className="relative">
-      {compact ? (
-        <Button size="icon" variant="ghost" onClick={() => setOpen(!open)} aria-expanded={open} aria-label={`Sessions in ${repo.name}`} title="Other sessions in this project">
-          <History className="size-4" />
-        </Button>
-      ) : (
-        <Button size="sm" variant="ghost" onClick={() => setOpen(!open)} aria-expanded={open}>
-          <History className="size-3.5" /> Sessions
-          <ChevronDown className="size-3" />
-        </Button>
-      )}
+      <Button size={compact ? 'icon' : 'sm'} variant="ghost" onClick={() => setOpen(!open)} aria-expanded={open} aria-label={`Sessions in ${repo.name}`} title="Other sessions in this project" className={cn(open && 'bg-hull-2 text-chalk')}>
+        <History className={compact ? 'size-4' : 'size-3.5'} />
+        {compact ? null : 'Sessions'}
+      </Button>
       {open ? (
-        <div className="absolute right-0 top-10 z-30 w-80 rounded-[12px] border border-seam bg-hull p-1.5 shadow-[0_12px_32px_-12px_rgb(16_24_40/0.25)]">
+        <div className="absolute right-0 top-9 z-30 w-80 rounded-[12px] border border-seam bg-hull p-1.5 shadow-[0_12px_32px_-12px_rgb(16_24_40/0.25)]">
           <button
             type="button"
-            className="flex h-9 w-full items-center gap-2 rounded-[8px] px-2.5 text-sm font-[600] hover:bg-hull-2"
+            className={cn(item, 'font-[600]')}
             onClick={() => {
               tabs.newSession(repo.id);
               setOpen(false);
@@ -818,105 +696,71 @@ function SessionsMenu({ repo, tab, current, compact }: { repo: RepoDTO; tab: Wor
                     tabs.show(tab.key, c.id);
                     setOpen(false);
                   }}
+                  aria-current={c.id === current ? 'true' : undefined}
                   className={cn('block w-full rounded-[8px] px-2.5 py-2 text-left hover:bg-hull-2', c.id === current && 'bg-hull-2')}
                 >
                   <span className="flex items-center gap-2 text-sm">
-                    {c.running ? <span className="size-1.5 shrink-0 rounded-full bg-telemetry" aria-label="Working" /> : null}
+                    {c.running ? <span className="size-1.5 shrink-0 rounded-full bg-telemetry" role="img" aria-label="Working" /> : null}
                     {c.seat === 'security' ? <ShieldCheck className="size-3.5 shrink-0 text-dust" aria-hidden /> : null}
                     <span className="truncate">{c.title}</span>
                   </span>
-                  <span className="block text-2xs text-dust-2">{timeAgo(c.updatedAt)}</span>
+                  <span className="block text-2xs text-dust">{timeAgo(c.updatedAt)}</span>
                 </button>
               </li>
             ))}
           </ul>
+          {onDelete ? (
+            <>
+              <div className="my-1 h-px bg-seam" />
+              <button
+                type="button"
+                className={cn(item, 'text-dust hover:text-fault')}
+                onClick={() => {
+                  setOpen(false);
+                  onDelete();
+                }}
+              >
+                <Trash2 className="size-4" /> Delete this session…
+              </button>
+            </>
+          ) : null}
         </div>
       ) : null}
     </div>
   );
 }
 
-function Header({
-  repo,
-  tab,
-  chat,
-  provider,
-  onProvider,
-  model,
-  onModel,
-  effort,
-  onEffort,
-  children,
-  trailing,
-  compact,
-  onExpand,
-}: {
-  repo: RepoDTO;
-  tab: WorkspaceTab;
-  chat: ConversationDetailDTO | null;
-  compact?: boolean;
-  onExpand?: () => void;
-  provider: Provider;
-  onProvider: (p: Provider) => void;
-  model?: string | null;
-  onModel?: (m: string | null) => void;
-  effort?: EffortLevel | null;
-  onEffort?: (e: EffortLevel | null) => void;
-  children?: React.ReactNode;
-  trailing?: React.ReactNode;
-}) {
-  const [settingsOpen, setSettingsOpen] = useState(false);
+/** One line: the status light, the project, and what this pane is about. Controls stay on the right. */
+function Header({ repo, tab, chat, lamp, compact, onExpand, onDelete, trailing }: { repo: RepoDTO; tab: WorkspaceTab; chat: ConversationDetailDTO | null; lamp: Lamp; compact?: boolean; onExpand?: () => void; onDelete?: () => void; trailing?: React.ReactNode }) {
   const security = chat?.seat === 'security';
-  const controls = (
-    <>
-      {children}
-      {!security ? <ProviderSwitch value={provider} onChange={onProvider} /> : null}
-      {!security && onModel ? <ModelPicker provider={provider} value={model ?? null} onChange={onModel} /> : null}
-      {/* Effort is Claude's and Codex's own thinking setting; OpenRouter models do not take it. */}
-      {!security && onEffort && provider !== 'openrouter' && provider !== 'huggingface' && provider !== 'cursor' ? <EffortPicker value={effort ?? null} onChange={onEffort} levels={effortLevelsFor(provider) ?? EFFORT_LEVELS} /> : null}
-    </>
-  );
-  if (compact) {
-    const setup = [provider === 'auto' ? 'Auto' : PROVIDER_NAME[provider], model ? (modelLabel(model) ?? model).replace(/^Claude /, '') : null, effort ? `${EFFORT_INFO[effort].label} effort` : null].filter(Boolean).join(', ');
-    return (
-      <div className="border-b border-seam">
-        <div className="flex items-center gap-1 py-1.5 pl-7 pr-1.5">
-          <div className="min-w-0 flex-1">
-            <h2 className="casual truncate text-base font-[700] leading-5">{security ? `Security check of ${repo.name}` : repo.name}</h2>
-            <p className="truncate text-2xs text-dust" title={repo.localPath}>
-              {chat?.title ?? 'New session'}
-            </p>
-          </div>
-          <Button size="sm" variant="ghost" onClick={() => setSettingsOpen(!settingsOpen)} aria-expanded={settingsOpen} title="AI, model, effort and commands for this session" className={cn(settingsOpen && 'bg-hull-2')}>
-            <SlidersHorizontal className="size-3.5" />
-            <span className="max-w-[150px] truncate">{setup}</span>
+  return (
+    <div className="flex h-11 shrink-0 items-center gap-2.5 border-b border-seam pl-4 pr-1.5">
+      <LampDot lamp={lamp} />
+      <h2 className="casual max-w-[55%] shrink-0 truncate text-base font-[700] leading-6">{security ? `Security check of ${repo.name}` : repo.name}</h2>
+      {/* Side by side the tab only names the project, so the pane says what the session is about. */}
+      {compact ? (
+        <p className="min-w-0 flex-1 truncate text-xs text-dust" title={repo.localPath}>
+          {chat?.title ?? 'New session'}
+        </p>
+      ) : (
+        <p className="mono min-w-0 flex-1 truncate text-2xs text-dust" title={repo.localPath}>
+          {shortPath(repo.localPath, 3)}
+        </p>
+      )}
+      <div className="flex shrink-0 items-center gap-0.5">
+        {trailing}
+        <SessionsMenu repo={repo} tab={tab} current={chat?.id ?? null} compact={compact} onDelete={onDelete} />
+        {onExpand ? (
+          <Button size="icon" variant="ghost" onClick={onExpand} aria-label={`Open ${repo.name} full size`} title="Full size">
+            <Maximize2 className="size-4" />
           </Button>
-          <SessionsMenu repo={repo} tab={tab} current={chat?.id ?? null} compact />
-          {trailing}
-          {onExpand ? (
-            <Button size="icon" variant="ghost" onClick={onExpand} aria-label={`Open ${repo.name} full size`} title="Full size">
-              <Maximize2 className="size-4" />
-            </Button>
-          ) : null}
+        ) : null}
+        {compact ? (
           <Button size="icon" variant="ghost" onClick={() => tabs.close(tab.key)} aria-label={`Close ${repo.name}`} title="Close this pane (the session is kept)">
             <X className="size-4" />
           </Button>
-        </div>
-        {settingsOpen ? <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-seam bg-night px-4 py-2">{controls}</div> : null}
+        ) : null}
       </div>
-    );
-  }
-  return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-seam px-5 py-3">
-      <div className="w-full min-w-0 sm:w-auto sm:flex-1">
-        <h2 className="casual truncate text-lg font-[700] leading-6">{chat?.seat === 'security' ? `Security check of ${repo.name}` : repo.name}</h2>
-        <p className="mono truncate text-2xs text-dust" title={repo.localPath}>
-          {repo.localPath}
-        </p>
-      </div>
-      {controls}
-      <SessionsMenu repo={repo} tab={tab} current={chat?.id ?? null} />
-      {trailing}
     </div>
   );
 }
@@ -938,29 +782,54 @@ interface PaneProps {
   onExpand?: () => void;
 }
 
+/** What happens next, said for the mode you are in. */
+function intro(mode: PromptMode, who: string): string {
+  switch (mode) {
+    case 'auto':
+      return `${who} reads and edits files here and runs commands on its own. Risky commands are still blocked.`;
+    case 'plan':
+      return `${who} reads this project and proposes a plan. Nothing changes until you approve it.`;
+    case 'read-only':
+      return `${who} reads this project and answers. Nothing is changed.`;
+    default:
+      return `${who} reads and edits files here, and asks you before it runs a command.`;
+  }
+}
+
 function NewSession({ repo, tab, compact, onExpand }: { repo: RepoDTO; tab: WorkspaceTab } & PaneProps) {
   const navigate = useNavigate();
-  const canEdit = repo.allowModify && repo.isGit;
+  const canEdit = repo.allowModify;
   const agents = useAgents();
   const settings = useSettings();
   const [draft, setDraft] = useState(() => takeDraft(tab.key));
   const [provider, setProvider] = useState<Provider>('auto');
   const [model, setModel] = useState<string | null>(null);
   const [effort, setEffort] = useState<EffortLevel | null>(null);
-  const [mode, setMode] = useState<SessionMode>(canEdit ? 'edit' : 'ask');
-  const [commands, setCommands] = useState<SessionPermissionMode | null>(null);
-  const permissionMode = commands ?? settings.data?.execution.sessionCommands ?? 'ask';
+  const [choice, setChoice] = useState<PromptMode | null>(null);
+  const mode: PromptMode = !canEdit ? 'read-only' : (choice ?? (settings.data?.execution.sessionCommands === 'auto' ? 'auto' : 'ask-first'));
   const start = useAction(
-    (v: { message: string; images: ChatImageInput[] }) =>
-      post<ConversationDetailDTO>('/api/chats', { message: v.message, ...(v.images.length ? { images: v.images } : {}), repoIds: [repo.id], mode, provider, permissionMode, model, effort }),
+    (v: { message: string; images: ChatImageInput[] }) => {
+      const m = modePatch(mode);
+      return post<ConversationDetailDTO>('/api/chats', {
+        message: v.message,
+        ...(v.images.length ? { images: v.images } : {}),
+        repoIds: [repo.id],
+        mode: m.mode,
+        provider,
+        permissionMode: m.permissionMode ?? settings.data?.execution.sessionCommands ?? 'ask',
+        model,
+        effort,
+      });
+    },
     { invalidate: [keys.chats] },
   );
   const actions = useRepoActions(repo, tab);
   const shell = useAction((command: string) => post<ConversationDetailDTO>(`/api/repos/${repo.id}/shell`, { command }), { invalidate: [keys.chats] });
   const [menu, setMenu] = useState<MenuKind | null>(null);
   const seat = agents.data?.find((a) => a.role === 'assistant');
-  const autoName = seat?.resolved.provider ? PROVIDER_NAME[seat.resolved.provider] : 'the AI';
-  const who = provider === 'auto' ? autoName : PROVIDER_NAME[provider];
+  const autoName = seat?.resolved.provider ? (PROVIDER_NAME[seat.resolved.provider] ?? 'The AI') : 'The AI';
+  const who = provider === 'auto' ? autoName : (PROVIDER_NAME[provider] ?? 'The AI');
+  const reading = mode === 'read-only';
   const prompt: PromptOptions = {
     repo,
     sessionId: null,
@@ -968,12 +837,8 @@ function NewSession({ repo, tab, compact, onExpand }: { repo: RepoDTO; tab: Work
     security: false,
     value: draft,
     onChange: setDraft,
-    mode: promptMode(mode, permissionMode),
-    onMode: (m) => {
-      const next = modePatch(m);
-      setMode(next.mode);
-      if (next.permissionMode) setCommands(next.permissionMode);
-    },
+    mode,
+    onMode: setChoice,
     provider,
     onProvider: (p) => {
       setProvider(p);
@@ -1021,39 +886,16 @@ function NewSession({ repo, tab, compact, onExpand }: { repo: RepoDTO; tab: Work
   };
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <Header
-        repo={repo}
-        tab={tab}
-        chat={null}
-        provider={provider}
-        onProvider={(p) => {
-          setProvider(p);
-          setModel(null);
-        }}
-        model={model}
-        onModel={setModel}
-        effort={effort}
-        onEffort={setEffort}
-        compact={compact}
-        onExpand={onExpand}
-      />
+      <Header repo={repo} tab={tab} chat={null} lamp="new" compact={compact} onExpand={onExpand} />
       <div className={cn('flex flex-1 flex-col justify-center overflow-y-auto', compact ? 'px-4 py-5' : 'px-5 py-10')}>
         <div className="mx-auto w-full max-w-[680px]">
           <h1 className={compact ? 'text-xl leading-7' : 'text-[28px] leading-9'}>What should we do in {repo.name}?</h1>
-          <p className="mt-2 text-sm text-dust">
-            {mode === 'edit'
-              ? `${who} works directly in this project, like Claude Code in a terminal: it reads, edits files and asks before running commands. You review the changes and commit.`
-              : `${who} reads this project and answers. Nothing is changed.`}
-          </p>
-          <div className="mt-6 flex flex-wrap items-center gap-x-4 gap-y-2">
-            <ModeSwitch value={mode} onChange={setMode} canEdit={canEdit} />
-            {mode === 'edit' ? <CommandsSwitch value={permissionMode} onChange={setCommands} provider={provider} /> : null}
-          </div>
-          <div className="mt-3">
-            <Composer prompt={prompt} placeholder={mode === 'edit' ? `Tell ${who} what to change…` : `Ask ${who} about ${repo.name}…`} big={!compact} autoFocus={!compact} />
+          <p className="mt-2 max-w-[62ch] text-sm text-dust">{intro(mode, who)}</p>
+          <div className={compact ? 'mt-4' : 'mt-6'}>
+            <Composer prompt={prompt} placeholder={reading ? `Ask about ${repo.name}…` : 'Describe what you need…'} big={!compact} autoFocus={!compact} />
           </div>
           <div className="mt-4 flex flex-wrap gap-2">
-            {STARTERS.filter((s) => mode === 'edit' || s.label === 'Explain this project').map((s) => (
+            {STARTERS.filter((s) => !reading || s.label === 'Explain this project').map((s) => (
               <button key={s.label} type="button" onClick={() => setDraft(s.text)} className="rounded-full border border-seam bg-hull px-3 py-1.5 text-xs text-chalk/85 transition-colors hover:border-seam-2 hover:bg-hull-2">
                 {s.label}
               </button>
@@ -1068,6 +910,9 @@ function NewSession({ repo, tab, compact, onExpand }: { repo: RepoDTO; tab: Work
 function RunningSession({ repo, tab, sessionId, compact, onExpand }: { repo: RepoDTO; tab: WorkspaceTab; sessionId: string } & PaneProps) {
   const navigate = useNavigate();
   const chat = useChat(sessionId);
+  const settings = useSettings();
+  const queueFollowUps = settings.data?.execution.sessionFollowUps === 'queue';
+  const changes = useChanges(repo.id);
   const [draft, setDraft] = useState('');
   const [showChanges, setShowChanges] = useState(false);
   const invalidate = [keys.chats, keys.chat(sessionId)];
@@ -1088,16 +933,8 @@ function RunningSession({ repo, tab, sessionId, compact, onExpand }: { repo: Rep
   const allow = useAction((command: string) => post<ConversationDetailDTO>(`/api/chats/${sessionId}/allow`, { command }), { invalidate });
   const allowAll = useAction(() => post<ConversationDetailDTO>(`/api/chats/${sessionId}/allow-all`), { invalidate });
   const approve = useAction((decision: 'accept' | 'acceptForSession' | 'decline') => post<ConversationDetailDTO>(`/api/chats/${sessionId}/approval`, { decision }), { invalidate });
-  const setCommands = useAction((permissionMode: SessionPermissionMode) => patch(`/api/chats/${sessionId}`, { permissionMode }), {
-    success: (r) => {
-      const mode = (r as ConversationSummaryDTO).permissionMode;
-      return mode === 'auto' ? 'Auto-accept on: commands run on their own, risky ones are still blocked' : mode === 'plan' ? 'Plan mode: the agent only reads and proposes a plan' : 'Ask first: the agent asks before running commands';
-    },
-    invalidate,
-  });
   const remove = useAction(() => del(`/api/chats/${sessionId}`), { success: 'Session deleted', invalidate: [keys.chats] });
   const setMode = useAction((m: PromptMode) => patch(`/api/chats/${sessionId}`, modePatch(m)), { invalidate });
-  const [confirmDelete, setConfirmDelete] = useState(false);
   const [menu, setMenu] = useState<MenuKind | null>(null);
   const actions = useRepoActions(repo, tab);
 
@@ -1109,7 +946,15 @@ function RunningSession({ repo, tab, sessionId, compact, onExpand }: { repo: Rep
   const editEvents = c.events.filter((e) => e.kind === 'tool' && (e.data as { step?: string } | null)?.step === 'edit').length;
   const who = c.provider === 'auto' ? 'the agent' : PROVIDER_NAME[c.provider];
   const submit = (text = draft, now = false) => text.trim() && send.mutate({ message: text.trim(), now }, { onSuccess: () => setDraft('') });
-  const canEdit = repo.allowModify && repo.isGit;
+  const canEdit = repo.allowModify;
+  // A command you ran yourself with `!` is not the agent's answer, even when it failed.
+  const lastAgent = [...c.messages].reverse().find((m) => m.role === 'assistant' && m.kind !== 'shell');
+  const waiting = !!c.approval || (!running && !!lastAgent?.blocked.some((b) => !c.allowedCommands.includes(b.command)));
+  const lamp: Lamp = waiting ? 'needs' : running ? 'working' : lastAgent?.status === 'failed' ? 'failed' : lastAgent ? 'done' : 'new';
+  const closeAfterDelete = () => {
+    tabs.close(tab.key);
+    navigate('/');
+  };
   const prompt: PromptOptions = {
     repo,
     sessionId,
@@ -1155,13 +1000,7 @@ function RunningSession({ repo, tab, sessionId, compact, onExpand }: { repo: Rep
         navigate('/');
       },
       ...(onExpand ? { expand: onExpand } : {}),
-      remove: () =>
-        remove.mutate(undefined, {
-          onSuccess: () => {
-            tabs.close(tab.key);
-            navigate('/');
-          },
-        }),
+      remove: () => remove.mutate(undefined, { onSuccess: closeAfterDelete }),
     },
     history: c.messages.filter((m) => m.role === 'user').map((m) => m.content).reverse(),
     menu,
@@ -1172,66 +1011,20 @@ function RunningSession({ repo, tab, sessionId, compact, onExpand }: { repo: Rep
   };
   // Plan mode: once the agent has proposed its plan, you decide how it goes on.
   const plan = !running && canEdit && c.seat !== 'security' ? planAwaitingApproval(promptMode(c.mode, c.permissionMode), c.messages) : null;
+  // The changes sit beside the session once there is something to review; until then they are one click away.
+  const changed = changes.data?.isGit ? changes.data.files.length : 0;
+  const docked = !compact && changed > 0;
   const changesButton = editing ? (
-    <Button size="sm" variant="ghost" className={cn(!compact && 'xl:hidden', showChanges && 'bg-hull-2')} onClick={() => setShowChanges(!showChanges)} aria-expanded={showChanges}>
+    <Button size="sm" variant="ghost" className={cn(docked && 'xl:hidden', showChanges && 'bg-hull-2 text-chalk')} onClick={() => setShowChanges(!showChanges)} aria-expanded={showChanges} title="What changed in this project, and commit it">
       Changes
+      {changed ? <span className="rounded-full bg-hull-3 px-1.5 text-2xs font-[600] tabular text-chalk">{changed}</span> : null}
     </Button>
   ) : null;
 
   return (
     <div className="flex min-h-0 flex-1">
       <section className="flex min-w-0 flex-1 flex-col bg-hull">
-        <Header
-          repo={repo}
-          tab={tab}
-          chat={c}
-          provider={c.provider}
-          onProvider={(p) => setProvider.mutate(p)}
-          model={c.model}
-          onModel={(m) => setModel.mutate(m)}
-          effort={c.effort}
-          onEffort={(e) => setEffort.mutate(e)}
-          compact={compact}
-          onExpand={onExpand}
-          trailing={
-            compact ? (
-              changesButton
-            ) : confirmDelete ? (
-            <span className="flex items-center gap-1.5 text-xs">
-              Delete this session?
-              <Button
-                size="sm"
-                variant="danger"
-                loading={remove.isPending}
-                onClick={() =>
-                  remove.mutate(undefined, {
-                    onSuccess: () => {
-                      tabs.close(tab.key);
-                      navigate('/');
-                    },
-                  })
-                }
-              >
-                Delete
-              </Button>
-              <Button size="sm" variant="ghost" onClick={() => setConfirmDelete(false)}>
-                Keep
-              </Button>
-            </span>
-          ) : (
-            <Button size="icon" variant="ghost" onClick={() => setConfirmDelete(true)} aria-label="Delete this session" title="Delete this session">
-              <Trash2 className="size-4" />
-            </Button>
-          )
-          }
-        >
-          {editing ? <CommandsSwitch value={c.permissionMode} onChange={(m) => setCommands.mutate(m)} provider={c.provider} /> : null}
-          {editing ? (
-            compact ? null : changesButton
-          ) : (
-            <span className="rounded-full bg-hull-2 px-2.5 py-1 text-2xs text-dust">{c.seat === 'security' ? 'Read-only check' : 'Only answers questions'}</span>
-          )}
-        </Header>
+        <Header repo={repo} tab={tab} chat={c} lamp={lamp} compact={compact} onExpand={onExpand} onDelete={() => setMenu('delete')} trailing={changesButton} />
         <Transcript
           chat={c}
           folder={repo.localPath.split(/[\\/]/).filter(Boolean).pop() ?? ''}
@@ -1245,16 +1038,19 @@ function RunningSession({ repo, tab, sessionId, compact, onExpand }: { repo: Rep
         {plan && planSeen !== plan.id && !c.approval ? (
           <PlanCard busy={send.isPending} onApprove={(permissionMode) => send.mutate({ message: 'The plan is approved. Go ahead and implement it now.', permissionMode })} onKeepPlanning={() => setPlanSeen(plan.id)} />
         ) : null}
-        <div className={cn('border-t border-seam bg-hull', compact ? 'px-3 py-2.5' : 'px-5 py-3 sm:px-8')}>
+        <div className={cn('border-t border-seam bg-hull', compact ? 'px-3 pb-1.5 pt-2.5' : 'px-5 pb-2 pt-3 sm:px-8')}>
           <div className="mx-auto max-w-[760px]">
             <Composer
               prompt={prompt}
               steerable={c.steerable}
+              queueFollowUps={queueFollowUps}
               placeholder={
                 running
-                  ? c.steerable
-                    ? `Type a follow-up. ${who === 'the agent' ? 'The agent' : who} reads it at its next step, without stopping.`
-                    : `Type a follow-up. It is sent when ${who} finishes, or click Send now to interrupt.`
+                  ? queueFollowUps
+                    ? `Type a follow-up. It is sent when ${who} finishes, or click Send now to interrupt.`
+                    : c.steerable
+                      ? `Type a follow-up. ${who === 'the agent' ? 'The agent' : who} reads it at its next step, without stopping.`
+                      : 'Add to the current task. The agent picks it up at its next completed step.'
                   : editing
                     ? 'What next?'
                     : 'Ask a follow-up…'
@@ -1264,7 +1060,7 @@ function RunningSession({ repo, tab, sessionId, compact, onExpand }: { repo: Rep
           </div>
         </div>
       </section>
-      {editing ? <ChangesPanel repo={repo} running={running} editEvents={editEvents} open={showChanges} onClose={() => setShowChanges(false)} docked={!compact} /> : null}
+      {editing ? <ChangesPanel repo={repo} running={running} editEvents={editEvents} open={showChanges} onClose={() => setShowChanges(false)} docked={docked} /> : null}
     </div>
   );
 }

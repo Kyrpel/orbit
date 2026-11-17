@@ -40,17 +40,22 @@ Everything runs on your machine with your own logins and keys. There is no hoste
 
 ## The workspace
 
-The workspace is the home screen. Open your projects and they sit **side by side**, each in its own pane, so you watch them all at once instead of switching between terminals. Choose Auto, 2, 3 or 4 columns; narrow windows adapt to one column. A pane waiting for you gets an amber edge. **One at a time** shows a single project full size.
+The workspace is the home screen. Open your projects and they sit **side by side**, each in its own pane, so you watch them all at once instead of switching between terminals. A pane waiting for you gets an amber edge. With two or more tabs open you can switch to **One at a time** (a single project full size), and with three or more choose Auto, 2, 3 or 4 columns; narrow windows adapt to one column.
+
+The top bar has just three places: **Workspace**, **Autopilot** and **Projects**. Everything you set up once lives under **Settings**: General, Agents, Skills, Connections and Activity.
+
+Local sessions can edit any connected project folder, with or without Git. Use **AI may edit files** in Projects to choose whether a folder is editable. Git is required for tracked diffs, commits, restoring files with rewind, and Autopilot's isolated worktrees.
 
 There are two looks, switched in the top bar:
 
 - **Terminal** (the default) draws every pane like Claude Code in a terminal: `>` for your messages, `⏺ Bash(npm test)` steps with `⎿` results and edit diffs under them, the boxed prompt and its mode line.
-- **Light** is a white, friendly version of the same thing, with the same features.
+- **Light** is a white, friendly version of the same thing, with the same features. The mode, AI, model and effort sit in one quiet line under the message box; click any of them to change it.
 
 | In a pane you can | |
 |---|---|
 | **Tell the agent what to change** | It edits the real files, like Claude Code in a terminal, and remembers the conversation. |
-| **Talk to it while it works** | A message sent mid-answer is read at the agent's next step. Esc stops it; Ctrl+Enter interrupts and sends. |
+| **Talk to it while it works** | Follow-ups add to the current task by default, keeping the original request and every addition. Agents with live input read them as they work; other agents continue both from their progress after a completed step. Change this in Settings → General → Workspace sessions → Follow-up messages. Ctrl+Enter interrupts immediately and continues with the combined instructions. |
+| **Stop it** | Esc (or **Stop** in the Light look, or `/stop`) ends the agent and everything it started: its tool servers and any command still running. On Windows that includes the processes behind each AI's launcher, so a stopped session never stays stuck and messages you send next go out right away. |
 | **Paste images and long text** | Ctrl+V a screenshot (or drop an image) and it becomes `[Image #1]`; Claude or Codex sees it. Long pastes fold to `[Pasted text #1 +42 lines]` and the full text is sent. |
 | **Watch it work** | Every step with its result: the command output, `Read 120 lines`, or an edit's changed lines. |
 | **Choose how commands run** | Shift+Tab cycles **Ask first** (you approve each new command), **Auto-accept** (commands run on their own; a safety check still blocks risky ones), **Plan** (the agent researches and proposes a plan, changes nothing until you approve) and **Read-only**. |
@@ -69,16 +74,16 @@ It is Claude Code's own plugin system, so whatever you install also works in you
 
 ## Your agents
 
-Each agent has one job and the AI that suits it. You can change the AI, model and effort for each one on the **Agents** page; **Settings** shows them all at a glance.
+Each agent has one job and the AI that suits it. **Settings → Agents** lists all six; open one to change its AI, model and effort.
 
 | Agent | Job | Used |
 |---|---|---|
-| **Session agent** | Works with you directly in a project | Every message in the workspace |
-| **Prompt engineer** | Rewrites rough tasks into clear ones with acceptance criteria | When you click *Improve* or type `/improve` (workspace or Asana task) |
-| **Security reviewer** | Looks for leaked secrets, injection, missing auth checks, risky dependencies | *Check security*, and every Autopilot task |
-| **Planner** | Reads the task and your code, picks the right project, writes the plan | Autopilot |
-| **Engineer** | Builds the plan in a separate copy of the project and adds tests | Autopilot |
-| **Reviewer** | Checks the real diff against the plan and the test results | Autopilot |
+| **Session agent** | The one you talk to. It edits files in your project and asks before running commands | Every message in the workspace |
+| **Prompt engineer** | Turns a rough request into a clear one | When you click *Improve* or type `/improve` (workspace or Asana task) |
+| **Security reviewer** | Looks for leaked passwords and keys, unsafe input handling and risky packages | *Check security*, and every Autopilot task |
+| **Planner** | Reads the task and your project, works out where the change belongs, and writes the plan | Autopilot |
+| **Engineer** | Builds the plan in a separate copy of your project and adds tests; it cannot commit or push without your approval | Autopilot |
+| **Reviewer** | Reads every change against the plan and the results of your checks | Autopilot |
 
 Session agents finish the job themselves: they build, test and check their own work, and when you ask them to commit, push or "make it live" they run git themselves instead of handing you a list of steps.
 
@@ -86,17 +91,17 @@ On **Auto**, the reviewers use a different AI from the one that wrote the code, 
 
 ## Other AIs: OpenRouter and your own models
 
-**Cursor** runs through its own CLI and your Cursor subscription. Install the [Cursor CLI](https://cursor.com/docs/cli/installation), run `cursor-agent login`, then refresh the Cursor card on **Agents**. Choose which account models appear in Orbit and add instructions for each. Pick Cursor in a session's AI menu. Orbit keeps each session's settings and chat separate, preserves your deny rules, and ignores project permission overrides. Cursor is available for local sessions; it does not provide Orbit's verified OS sandbox for Autopilot.
+**Cursor** runs through its own CLI and your Cursor subscription. Install the [Cursor CLI](https://cursor.com/docs/cli/installation), run `cursor-agent login`, then refresh the Cursor row on **Settings → Agents**. Choose which account models appear in Orbit and add instructions for each. Pick Cursor in a session's AI menu. Orbit keeps each session's settings and chat separate, preserves your deny rules, and ignores project permission overrides. Cursor is available for local sessions; it does not provide Orbit's verified OS sandbox for Autopilot.
 
 Besides Claude and Codex, a session can use two more AIs. Pick them next to Auto, Claude and Codex in a session (or with `/ai`), then the model with `/model`. Both run inside Claude Code's tools with their own key: your Claude login is never used, and nothing in an OpenRouter or Hugging Face session falls back to Claude or Codex (not the answers, not the next-message suggestions, not `/improve`).
 
 **OpenRouter** (DeepSeek, Qwen, Hermes, GPT, Gemini and hundreds more)
 1. Create an API key at [openrouter.ai/keys](https://openrouter.ai/keys).
-2. On the **Agents** page, paste it into the OpenRouter card and click Connect.
+2. On **Settings → Agents**, open the OpenRouter row, paste the key and click Connect.
 3. Add models by pasting their openrouter.ai link. Orbit shows each model's price, context size, and whether it can use tools: models without tool support are marked *chat only* (they can talk, but not read or change your files).
 
 **Hugging Face Inference Endpoints** (any GGUF model, on a GPU you rent by the hour)
-1. Paste a Hugging Face model link into the Hugging Face card on the **Agents** page. Orbit reads its files and Hugging Face's GPU list and shows which GPUs each file fits on, with the price per hour. No token is needed to look.
+1. Paste a Hugging Face model link into the Hugging Face row on **Settings → Agents**. Orbit reads its files and Hugging Face's GPU list and shows which GPUs each file fits on, with the price per hour. No token is needed to look.
 2. To create the endpoint, connect a Hugging Face token with write access ([huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)) and add a payment method to your Hugging Face account.
 3. Pick the file and GPU and click Create. The endpoint is private to your token, runs llama.cpp with a 64k-token context and tool use, and goes to sleep after the minutes you choose without use, so it only costs while it is awake. A session wakes it when needed (a few minutes) and tells you while it waits. Pause or delete it from the same card.
 
@@ -110,13 +115,13 @@ Session agents can look up what you did in Claude Code or Codex outside Orbit, i
 
 ## Autopilot
 
-For tasks you want done hands-off (for example from Asana), Autopilot runs the whole team:
+For tasks you want done hands-off (for example from Asana), click **New task** on the Autopilot page and describe it in a sentence or two. Autopilot runs the whole team:
 
 ```
 Plan ──► Build ──► Your checks ──► Review ──► Security ──► You approve ──► Pull request
 ```
 
-It works in a separate copy of the project on its own branch, sends failing checks and serious findings back to the engineer automatically, and never commits, pushes or opens a pull request without your approval. Orbit never merges.
+It works in a separate copy of the project on its own branch, sends failing checks and serious findings back to the engineer automatically, and never commits, pushes or opens a pull request without your approval. Orbit never merges. The Autopilot page shows only what needs you: tasks waiting for you, in progress, ready to run and recently finished.
 
 ## Quick start
 
@@ -125,7 +130,7 @@ You need **Node.js 22.11+**, **git**, and at least one AI:
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code), signed in (run `claude` once), or an `ANTHROPIC_API_KEY`;
 - optionally [Codex](https://github.com/openai/codex) (`npm install -g @openai/codex`, then `codex login`).
 
-Optional, for more models: an [OpenRouter](https://openrouter.ai/keys) API key, or a [Hugging Face](https://huggingface.co/settings/tokens) token with billing set up. You add them on the **Agents** page once Orbit is running.
+Optional, for more models: an [OpenRouter](https://openrouter.ai/keys) API key, or a [Hugging Face](https://huggingface.co/settings/tokens) token with billing set up. You add them on **Settings → Agents** once Orbit is running.
 
 ```bash
 git clone https://github.com/Kyrpel/orbit.git
@@ -136,7 +141,7 @@ pnpm build
 pnpm orbit start       # opens the dashboard at http://127.0.0.1:7420
 ```
 
-The first visit walks you through setup. Add a project (any folder on your computer), open it in the workspace, and start talking.
+The first visit walks you through three short steps: add a project (any folder on your computer), check that Orbit found your AI, and optionally connect GitHub and Asana. Then the workspace opens: pick a project and start talking.
 
 Want to try it on something disposable first?
 
@@ -151,7 +156,7 @@ pnpm demo:repo ~/orbit-demo      # a tiny project with tests
 | `Enter` / `Shift+Enter` | Send / new line |
 | `/` | Commands |
 | `Shift+Tab` | Ask first → Auto-accept → Plan → Read-only |
-| `Esc` | Stop the agent (or close a menu) |
+| `Esc` | Stop the agent and everything it started (or close a menu) |
 | `Ctrl+Enter` | Interrupt the agent and send right away |
 | `↑` | Your last message |
 | `Tab` | Take the suggested next message |
@@ -166,11 +171,11 @@ In permission prompts and pickers: `↑` `↓` and `Enter`, or press the option'
 
 - **Everyday changes: use the workspace.** That is one agent, about the same cost as Claude Code in a terminal.
 - **One topic per session.** `/clear` starts a new session for a new topic; long sessions carry more context.
-- **Match the model and effort to the job**, per pane or on the Agents page: a fast model and low effort for routine work, the strongest one for hard problems.
+- **Match the model and effort to the job**, per pane or on **Settings → Agents**: a fast model and low effort for routine work, the strongest one for hard problems.
 - **Auto-accept** saves the extra round trip each *Allow* click costs.
 - **Keep only the skills you use.** Every installed plugin adds tokens to every session; *What's inside* shows how many.
 - **Spread the load:** give the Reviewer or Prompt engineer to Codex so both subscriptions share the work.
-- **Autopilot is the full team** (at least four agent runs per task). Lower *Automatic fix passes* in Settings, or turn off the security review for projects that do not need it.
+- **Autopilot is the full team** (at least four agent runs per task). Lower *Automatic fix attempts* in Settings → General → Advanced → Limits for Autopilot, or turn off *Security check on every Autopilot task* in Settings → Agents.
 
 ## Safety
 
@@ -181,7 +186,7 @@ Orbit lets AI change code, so the guardrails are built in:
 - **Commands need your OK** in *Ask first*; in *Auto-accept* a safety check blocks risky ones. Codex runs inside its own sandbox; when it needs something the sandbox blocks (a commit, a push), Orbit asks you first, or applies its own rules in *Auto-accept*.
 - **Your projects stay yours.** Settings files inside a project cannot loosen Orbit's rules. Autopilot works in a separate copy of the project.
 - **Your credentials stay where they are.** Orbit uses Claude Code's and Codex's own logins and never reads them. Your OpenRouter, Hugging Face and Asana keys live in `~/.orbit/secrets.json`, outside your projects, are only sent to their own service, and output is scanned and redacted for secrets. An OpenRouter or Hugging Face session never uses your Claude login.
-- **Rented GPUs only cost while awake.** Hugging Face endpoints Orbit creates sleep after the minutes you choose without use; Orbit shows the hourly price before you create one, and you can pause or delete them from the Agents page.
+- **Rented GPUs only cost while awake.** Hugging Face endpoints Orbit creates sleep after the minutes you choose without use; Orbit shows the hourly price before you create one, and you can pause or delete them from Settings → Agents.
 - **Skills are your choice.** Plugins can bring hooks and MCP servers that run on your computer; Orbit shows them before you keep a plugin. Install only what you trust.
 - **Local only.** The API listens on 127.0.0.1 and requires a random token.
 
@@ -191,7 +196,7 @@ More in [SECURITY.md](SECURITY.md).
 
 Turn Asana tasks into finished work:
 
-1. **Integrations → Asana**: paste a personal access token (Asana → developer console → *Create new token*).
+1. **Settings → Connections → Asana**: paste a personal access token (Asana → developer console → *Create new token*).
 2. **Projects → Asana projects → Connect project**: pick the Asana project and the code projects its tasks may change.
 3. Write the task in Asana as usual. Click **Improve** in Orbit to have the Prompt engineer rewrite it with clear acceptance criteria, then **Update in Asana**.
 4. Start it: comment `/orbit run` on the task (lines below it become extra instructions), or pick it under **Autopilot → Ready to run**.

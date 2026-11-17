@@ -77,6 +77,22 @@ const SESSION_MAX_TURNS = 2000;
 
 type Provider = ConversationSummaryDTO['provider'];
 
+/** The unfinished request and every addition, retained across a step-boundary continuation. */
+interface ActiveWork {
+  requests: string[];
+  userIds: string[];
+  pendingLive: Set<string>;
+  tools: Set<string>;
+  anonymousTools: number;
+  continueWork: boolean;
+}
+
+const FOLLOW_UP_RULE = 'Messages received while you are working add to the current task. Keep completing the original request and all additions. Only replace or cancel earlier work when the developer explicitly asks you to. Use the progress already made; do not repeat completed actions.';
+
+function continuedWorkPrompt(requests: string[]): string {
+  return `${FOLLOW_UP_RULE}\n\nContinue the same unfinished task from its current state. Orbit paused between steps to include more instructions.\n\n${requests.map((text, i) => `${i === 0 ? 'Original request' : `Additional instruction ${i}`}\n${text}`).join('\n\n')}`;
+}
+
 /** What a session agent gets of your sessions outside Orbit (see `PastSessions`). */
 interface PastContext {
   /** The library folder: readable, never writable. */
@@ -116,6 +132,7 @@ export class ChatService {
   private readonly running = new Map<string, AbortController>();
   /** For agents that take messages mid-answer: delivers one right away. */
   private readonly steers = new Map<string, SteerFn>();
+  private readonly activeWork = new Map<string, ActiveWork>();
   /** Your likely next message, per session, for the answer it follows (`after`). */
   private readonly nextPrompts = new Map<string, { after: string; text: string }>();
   /** Requests the agent is waiting on, oldest first (Codex asking to run what its sandbox blocks). */
@@ -189,11 +206,10 @@ export class ChatService {
     return this.detail(id);
   }
 
-  /** Adds a message to a session and starts the agent on it. */
   /**
-   * Adds a message. While the agent is still answering, the message is queued, as in
-   * Claude Code, and goes out as soon as the current answer ends; `now` interrupts the
-   * current answer so it goes out right away.
+   * Follow-ups add to the active task. Without live input, wait for a completed step
+   * and resume with the original request plus its additions. Only `now` interrupts
+   * immediately; the queue preference waits for the complete answer.
    */
   send(id: string, input: { message: string; provider?: Provider; mode?: SessionMode; repoIds?: string[]; permissionMode?: SessionPermissionMode; model?: string | null; effort?: EffortLevel | null; images?: ChatImageInput[]; now?: boolean }): ConversationDetailDTO {
     this.row(id);
@@ -204,16 +220,26 @@ export class ChatService {
       const ts = nowIso(this.ctx);
       const msgId = newId('msg');
       const attachments = this.saveImages(id, msgId, input.images);
-      // Delivered right away when the agent can take it, like typing into Claude Code while it works.
-      const steer = input.now ? undefined : this.steers.get(id);
+      const sendWhileWorking = this.ctx.settings.get().execution.sessionFollowUps === 'send';
+      const controller = this.running.get(id)!;
+      const work = this.activeWork.get(id);
+      // Do not deliver into a run that is already stopping for an earlier follow-up.
+      const steer = !input.now && sendWhileWorking && !controller.signal.aborted ? this.steers.get(id) : undefined;
       if (steer && steer(message, this.agentImages(id, attachments))) {
         this.ctx.db.insert(conversationMessages).values({ id: msgId, conversationId: id, role: 'user', content: message, status: 'steered', attachments, createdAt: ts, finishedAt: ts }).run();
+        work?.requests.push(message);
+        work?.userIds.push(msgId);
         this.touch(id);
         return this.detail(id);
       }
       this.ctx.db.insert(conversationMessages).values({ id: msgId, conversationId: id, role: 'user', content: message, status: 'queued', attachments, createdAt: ts }).run();
       this.touch(id);
-      if (input.now) this.running.get(id)?.abort();
+      if (input.now) {
+        if (work) work.continueWork = true;
+        controller.abort();
+      } else if (sendWhileWorking) {
+        work?.pendingLive.add(msgId);
+      }
       return this.detail(id);
     }
     this.ask(id, message, undefined, input.images);
@@ -243,6 +269,7 @@ export class ChatService {
     if (!msg || msg.conversationId !== id) throw new OrbitError('NOT_FOUND', 'Message not found.');
     if (msg.status !== 'queued') throw new OrbitError('CONFLICT', 'This message has already been sent.');
     this.ctx.db.delete(conversationMessages).where(eq(conversationMessages.id, messageId)).run();
+    this.activeWork.get(id)?.pendingLive.delete(messageId);
     this.touch(id);
     return this.detail(id);
   }
@@ -334,12 +361,25 @@ export class ChatService {
 
   cancel(id: string): void {
     this.row(id);
+    this.stopPendingWork(id);
     this.dropApprovals(id);
     this.running.get(id)?.abort();
   }
 
+  private stopPendingWork(id: string): void {
+    const work = this.activeWork.get(id);
+    if (work) {
+      work.continueWork = false;
+      work.pendingLive.clear();
+    }
+    for (const msg of this.messages(id).filter((m) => m.status === 'queued')) {
+      this.ctx.db.update(conversationMessages).set({ status: 'cancelled', error: 'Not sent: the session was stopped.', finishedAt: nowIso(this.ctx) }).where(eq(conversationMessages.id, msg.id)).run();
+    }
+  }
+
   remove(id: string): void {
     const row = this.row(id);
+    this.stopPendingWork(id);
     this.dropApprovals(id);
     this.running.get(id)?.abort();
     // Its saved copies of the project's files (for /rewind) go too.
@@ -375,7 +415,10 @@ export class ChatService {
   /** Stops every running session (Orbit is shutting down). */
   stopAll(): void {
     for (const id of [...this.approvals.keys()]) this.dropApprovals(id);
-    for (const c of this.running.values()) c.abort();
+    for (const [id, c] of this.running) {
+      this.stopPendingWork(id);
+      c.abort();
+    }
   }
 
   isRunning(id: string): boolean {
@@ -470,7 +513,7 @@ export class ChatService {
       const ts = nowIso(this.ctx);
       this.ctx.db
         .insert(conversations)
-        .values({ id, title: titleFrom(`!${command}`), repoIds: [repo.id], mode: repo.allowModify && repo.isGit ? 'edit' : 'ask', provider: 'auto', permissionMode: this.ctx.settings.get().execution.sessionCommands, allowedCommands: [], createdAt: ts, updatedAt: ts })
+        .values({ id, title: titleFrom(`!${command}`), repoIds: [repo.id], mode: 'edit', provider: 'auto', permissionMode: this.ctx.settings.get().execution.sessionCommands, allowedCommands: [], createdAt: ts, updatedAt: ts })
         .run();
     }
     const chatId = id;
@@ -512,36 +555,42 @@ export class ChatService {
   }
 
   /** Runs the agent on `text`; `userIds` are the messages it answers (left out of the history). */
-  private startTurn(conversationId: string, text: string, userIds: string[]): void {
+  private startTurn(conversationId: string, text: string, userIds: string[], requests = [text], checkpointUserId: string | null = userIds[0] ?? null): void {
     const answerId = newId('msg');
     this.ctx.db.insert(conversationMessages).values({ id: answerId, conversationId, role: 'assistant', content: '', status: 'running', createdAt: nowIso(this.ctx) }).run();
     this.touch(conversationId);
     const controller = new AbortController();
     this.running.set(conversationId, controller);
+    const work: ActiveWork = { requests: [...requests], userIds: [...userIds], pendingLive: new Set(), tools: new Set(), anonymousTools: 0, continueWork: false };
+    this.activeWork.set(conversationId, work);
     const conv = this.row(conversationId);
     if (conv.mode === 'edit' && conv.permissionMode !== 'plan' && !this.compacting.has(conversationId)) this.writingProjects.set(conversationId, conv.repoIds);
-    void this.answer(conversationId, answerId, text, controller.signal, userIds)
+    void this.answer(conversationId, answerId, text, controller.signal, userIds, checkpointUserId)
       .catch((err: Error) => {
         this.finish(answerId, { status: 'failed', error: redactSecrets(err.message) });
       })
       .finally(() => {
         this.running.delete(conversationId);
+        this.activeWork.delete(conversationId);
         this.writingProjects.delete(conversationId);
         this.compacting.delete(conversationId);
-        this.afterRun(conversationId);
+        this.afterRun(conversationId, work.continueWork ? work : undefined);
       });
   }
 
   /** After an agent turn or a `!` command: tell the dashboard, and send what was queued meanwhile. */
-  private afterRun(conversationId: string): void {
+  private afterRun(conversationId: string, unfinished?: ActiveWork): void {
     const conv = this.ctx.db.select().from(conversations).where(eq(conversations.id, conversationId)).get();
+    if (!conv) return;
     if (conv?.mode === 'edit') for (const repoId of conv.repoIds) this.ctx.bus.publish({ type: 'repo.changed', repoId });
     // Messages sent while the agent was busy go out now, together, as the next turn.
     const queued = conv ? this.messages(conversationId).filter((m) => m.role === 'user' && m.status === 'queued') : [];
-    if (queued.length) {
+    if (queued.length || unfinished) {
       const ts = nowIso(this.ctx);
       for (const m of queued) this.ctx.db.update(conversationMessages).set({ status: 'done', finishedAt: ts }).where(eq(conversationMessages.id, m.id)).run();
-      this.startTurn(conversationId, queued.map((m) => m.content).join('\n\n'), queued.map((m) => m.id));
+      const requests = [...(unfinished?.requests ?? []), ...queued.map((m) => m.content)];
+      const userIds = [...(unfinished?.userIds ?? []), ...queued.map((m) => m.id)];
+      this.startTurn(conversationId, unfinished ? continuedWorkPrompt(requests) : requests.join('\n\n'), userIds, requests, queued[0]?.id ?? null);
       return;
     }
     this.touch(conversationId);
@@ -569,13 +618,15 @@ export class ChatService {
     return runs;
   }
 
-  private async answer(conversationId: string, messageId: string, message: string, signal: AbortSignal, userIds: string[]): Promise<void> {
+  private async answer(conversationId: string, messageId: string, message: string, signal: AbortSignal, userIds: string[], checkpointUserId: string | null): Promise<void> {
     const conv = this.row(conversationId);
     const projects = this.projectsFor(conv.repoIds);
     if (!projects.length) {
       this.finish(messageId, { status: 'failed', error: 'This project is no longer connected. Add it again in Projects.' });
       return;
     }
+    // Recheck saved permissions on each message, including an existing editing session.
+    if (conv.mode === 'edit') this.allowedMode('edit', conv.repoIds);
     // OpenRouter or your Hugging Face endpoint: that AI only, never another one in its place. A
     // sleeping endpoint wakes first, and the session says so while it waits.
     const gw = conv.seat !== 'security' ? this.gatewayFor(conv.provider) : null;
@@ -615,9 +666,9 @@ export class ChatService {
     // Before an agent that may change files starts, save them, so /rewind can bring them back.
     const repo = projects[0];
     let checkpoint: string | null = null;
-    if (conv.mode === 'edit' && conv.permissionMode !== 'plan' && !compacting && repo?.isGit && userIds[0] && !signal.aborted) {
-      const saved = await takeCheckpoint(this.ctx.git, repo.localPath, checkpointRef(conversationId, userIds[0]));
-      if (saved) this.ctx.db.update(conversationMessages).set({ checkpoint: saved }).where(eq(conversationMessages.id, userIds[0])).run();
+    if (conv.mode === 'edit' && conv.permissionMode !== 'plan' && !compacting && repo?.isGit && checkpointUserId && !signal.aborted) {
+      const saved = await takeCheckpoint(this.ctx.git, repo.localPath, checkpointRef(conversationId, checkpointUserId));
+      if (saved) this.ctx.db.update(conversationMessages).set({ checkpoint: saved }).where(eq(conversationMessages.id, checkpointUserId)).run();
       checkpoint = saved;
     }
 
@@ -793,6 +844,10 @@ export class ChatService {
           execution: { mode: 'trusted-local', allowNetworkTools: false },
         };
 
+    if (edit && !primary!.isGit) {
+      request.systemAppend = `${request.systemAppend}\n\nThis project is a plain folder without Git. Work directly in its files. Git diffs, commits and code rewind are unavailable. Do not initialize Git unless the developer asks you to.`;
+    }
+
     // OpenRouter or your Hugging Face endpoint: Claude Code runs the model with that AI's key, never your Claude login.
     if (seat.gateway) {
       const gateway = seat.gateway;
@@ -825,11 +880,41 @@ export class ChatService {
       title: `${who} ${resumeId ? 'continued' : 'started'} (${on})`,
       data: { runId, phase: 'start', runtime: seat.runtime.id, provider: seat.provider, model: seat.model },
     });
+    request.systemAppend += `\n\n${FOLLOW_UP_RULE}`;
+    const work = this.activeWork.get(conv.id);
     const result = await seat.runtime.run(request, {
       signal,
-      onEvent: (e) => this.event(conv.id, messageId, { ...agentEventRecord(e, runId), actor: 'assistant' }),
+      onEvent: (e) => {
+        this.event(conv.id, messageId, { ...agentEventRecord(e, runId), actor: 'assistant' });
+        if (!work) return;
+        if (e.type === 'tool') {
+          if (e.id) work.tools.add(e.id);
+          else work.anonymousTools++;
+        } else if (e.type === 'tool_result') {
+          if (e.id) work.tools.delete(e.id);
+          else work.anonymousTools = Math.max(0, work.anonymousTools - 1);
+        }
+        // Never kill a running tool just because another instruction was added.
+        // A runtime without live input continues the whole task after this completed step.
+        if ((e.type === 'tool_result' || e.type === 'text') && !work.tools.size && !work.anonymousTools && work.pendingLive.size && !signal.aborted) {
+          work.continueWork = true;
+          this.running.get(conv.id)?.abort();
+        }
+      },
       onSteerReady: (fn) => {
-        if (fn) this.steers.set(conv.id, fn);
+        if (fn) {
+          this.steers.set(conv.id, fn);
+          // A message sent during startup belongs in this run once its input opens.
+          if (work && !signal.aborted) {
+            for (const msg of this.messages(conv.id).filter((m) => m.status === 'queued' && work.pendingLive.has(m.id))) {
+              if (!fn(msg.content, this.agentImages(conv.id, msg.attachments))) break;
+              this.ctx.db.update(conversationMessages).set({ status: 'steered', finishedAt: nowIso(this.ctx) }).where(eq(conversationMessages.id, msg.id)).run();
+              work.requests.push(msg.content);
+              work.userIds.push(msg.id);
+              work.pendingLive.delete(msg.id);
+            }
+          }
+        }
         else this.steers.delete(conv.id);
         this.ctx.bus.publish({ type: 'chat.updated', conversationId: conv.id });
       },
@@ -845,7 +930,7 @@ export class ChatService {
     this.event(conv.id, messageId, {
       kind: status === 'failed' ? 'error' : 'agent',
       actor: 'assistant',
-      title: `${who} ${status === 'succeeded' ? 'finished' : status === 'cancelled' ? 'was stopped' : `stopped (${result.status.replace('_', ' ')})`} after ${formatDuration(result.durationMs)}`,
+      title: status === 'cancelled' && work?.continueWork ? `${who} is continuing the original task with your additions` : `${who} ${status === 'succeeded' ? 'finished' : status === 'cancelled' ? 'was stopped' : `stopped (${result.status.replace('_', ' ')})`} after ${formatDuration(result.durationMs)}`,
       detail: result.error,
       data: { runId, phase: 'end', status, numTurns: result.numTurns },
     });
@@ -871,8 +956,10 @@ export class ChatService {
           if (now) {
             changes = {
               title: `What ${h.from} changed while working on this message`,
-              stat: (await this.ctx.git.run(repo.localPath, ['diff', '--stat', h.checkpoint, now])).trim(),
-              diff: await this.ctx.git.run(repo.localPath, ['diff', h.checkpoint, now]),
+              // No external diff or textconv drivers (a project's git settings must not run programs here), and
+              // secrets scrubbed, like the Changes panel's diff.
+              stat: redactSecrets((await this.ctx.git.run(repo.localPath, ['diff', '--no-ext-diff', '--no-textconv', '--stat', h.checkpoint, now], { timeoutMs: 60_000 })).trim()),
+              diff: redactSecrets(await this.ctx.git.run(repo.localPath, ['diff', '--no-ext-diff', '--no-textconv', '--find-renames', h.checkpoint, now], { timeoutMs: 60_000 })),
             };
           }
         } else {
@@ -1123,8 +1210,8 @@ export class ChatService {
     if (repoIds.length !== 1) throw new OrbitError('VALIDATION', 'A working session edits exactly one project.');
     const repo = this.repos.list().find((r) => r.id === repoIds[0]);
     if (!repo) throw new OrbitError('NOT_FOUND', 'Project not found.');
-    if (!repo.allowModify || !repo.isGit) {
-      throw new OrbitError('PRECONDITION', `${repo.name} is read-only in Orbit.`, { hint: repo.isGit ? 'Allow changes for it in Projects.' : 'Plain folders can be read but not changed. Initialize git in it first.' });
+    if (!repo.allowModify) {
+      throw new OrbitError('PRECONDITION', `${repo.name} is read-only in Orbit.`, { hint: 'Allow changes for it in Projects.' });
     }
     return 'edit';
   }

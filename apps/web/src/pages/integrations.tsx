@@ -1,7 +1,7 @@
 import { Check, Trash2, X } from 'lucide-react';
 import { useState } from 'react';
 import type { IntegrationDTO } from '@orbit/shared';
-import { Button, Code, Empty, ErrorNote, Field, Input, Loading, PageHeader, Panel, PanelHeader, Tag } from '../components/ui';
+import { Button, Code, Disclosure, ErrorNote, Field, Input, Loading, PageHeader, Panel, PanelHeader, Tag } from '../components/ui';
 import { del, keys, post, useAction, useDoctor, useIntegrations } from '../lib/api';
 
 export function AsanaConnectForm({ onConnected }: { onConnected?: (i: IntegrationDTO) => void }) {
@@ -17,8 +17,7 @@ export function AsanaConnectForm({ onConnected }: { onConnected?: (i: Integratio
         htmlFor="asana-token"
         hint={
           <>
-            Create one in the Asana developer console (<Code>app.asana.com/0/my-apps</Code>), then Create new token. Orbit verifies it with <Code>GET /users/me</Code> and stores it in
-            your Orbit data folder, never in the database or logs.
+            In Asana, open <Code>app.asana.com/0/my-apps</Code> and choose Create new token, then paste it here. Orbit checks it with Asana and keeps it on this computer only.
           </>
         }
       >
@@ -33,7 +32,7 @@ export function AsanaConnectForm({ onConnected }: { onConnected?: (i: Integratio
 
 function AsanaAccount({ i }: { i: IntegrationDTO }) {
   const [gid, setGid] = useState('');
-  const add = useAction((externalUserId: string) => post(`/api/integrations/${i.id}/authorized-users`, { externalUserId }), { success: 'User authorized', invalidate: [keys.integrations] });
+  const add = useAction((externalUserId: string) => post(`/api/integrations/${i.id}/authorized-users`, { externalUserId }), { success: 'Added', invalidate: [keys.integrations] });
   const removeUser = useAction((u: string) => del(`/api/integrations/${i.id}/authorized-users/${u}`), { invalidate: [keys.integrations] });
   const disconnect = useAction(() => del(`/api/integrations/${i.id}`), { success: 'Asana disconnected. Revoke the token in Asana if you no longer need it.', invalidate: [keys.integrations, keys.projects] });
   return (
@@ -53,8 +52,8 @@ function AsanaAccount({ i }: { i: IntegrationDTO }) {
       </div>
       <div className="space-y-3 px-5 py-4">
         <div>
-          <p className="text-sm font-[600]">Who can trigger missions with /orbit run</p>
-          <p className="text-xs text-dust">Comments from anyone else are ignored and logged in Activity. If an author cannot be identified, the mission waits for your approval.</p>
+          <p className="text-sm font-[600]">Who may start tasks with /orbit run</p>
+          <p className="text-xs text-dust">Comments from anyone else are ignored and noted in Activity. If Orbit cannot tell who wrote a comment, the task waits for your OK.</p>
         </div>
         <ul className="divide-y divide-seam rounded-[10px] border border-seam">
           {i.authorizedUsers.map((u) => (
@@ -72,9 +71,9 @@ function AsanaAccount({ i }: { i: IntegrationDTO }) {
           ))}
         </ul>
         <div className="flex gap-2">
-          <Input className="mono" value={gid} onChange={(e) => setGid(e.target.value)} placeholder="Asana user gid, e.g. 1203456789012345" aria-label="Asana user gid" />
+          <Input className="mono" value={gid} onChange={(e) => setGid(e.target.value)} placeholder="Asana user ID, e.g. 1203456789012345" aria-label="Asana user ID" />
           <Button disabled={!/^\d{3,}$/.test(gid.trim())} loading={add.isPending} onClick={() => add.mutate(gid.trim(), { onSuccess: () => setGid('') })}>
-            Authorize
+            Add person
           </Button>
         </div>
       </div>
@@ -89,10 +88,10 @@ export function IntegrationsPage() {
   const asana = integrations.data?.filter((i) => i.provider === 'asana') ?? [];
   return (
     <>
-      <PageHeader title="Integrations" description="Where tasks come from and where pull requests go. Credentials stay on this machine." />
+      <PageHeader title="Connections" description="Where tasks come from and where finished work goes. Your logins stay on this computer." />
       <div className="space-y-6">
         <Panel>
-          <PanelHeader title="GitHub" description="Orbit uses your GitHub CLI login to push branches and open pull requests, only after you approve each one." />
+          <PanelHeader title="GitHub" description="Used to open pull requests with your own GitHub login, and only after you approve each one." />
           <div className="px-5 py-4 text-sm">
             {!gh ? (
               <Loading />
@@ -109,7 +108,7 @@ export function IntegrationsPage() {
         </Panel>
 
         <Panel>
-          <PanelHeader title="Asana" description="Read tasks, listen for /orbit run comments, post progress and pull request links back to the task." />
+          <PanelHeader title="Asana" description="Optional. Autopilot can pick up your Asana tasks and post its progress back on them." />
           {integrations.isPending ? <Loading /> : integrations.error ? <div className="p-5"><ErrorNote error={integrations.error} /></div> : asana.length ? asana.map((i) => <AsanaAccount key={i.id} i={i} />) : (
             <div className="px-5 py-4">
               <AsanaConnectForm />
@@ -118,27 +117,23 @@ export function IntegrationsPage() {
         </Panel>
 
         <Panel>
-          <PanelHeader title="AI runtime" description="Agents run through the Claude Agent SDK (API key or cloud provider), or your locally installed Claude Code." />
-          {doctor.isPending ? (
-            <Loading />
-          ) : (
-            <ul className="divide-y divide-seam">
-              {doctor.data?.runtimes.map((r) => (
-                <li key={r.id} className="flex items-start gap-3 px-5 py-3 text-sm">
-                  {r.available ? <Check className="mt-0.5 size-4 text-go" /> : <X className="mt-0.5 size-4 text-dust" />}
-                  <div>
-                    <p>{r.displayName}</p>
-                    <p className="text-xs text-dust">{r.available ? Object.entries(r.details).map(([k, v]) => `${k}: ${v}`).join(', ') : r.reason}</p>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Panel>
-
-        <Panel>
-          <PanelHeader title="Planned" />
-          <Empty title="GitHub Issues, Linear and Jira">Orbit's core works with a provider-neutral task model, so these plug in as connectors. Contributions are welcome.</Empty>
+          <Disclosure title="AI tools found on this computer" summary="A check of what Orbit can use, for when something does not work.">
+            {doctor.isPending ? (
+              <Loading />
+            ) : (
+              <ul className="divide-y divide-seam border-t border-seam">
+                {doctor.data?.runtimes.map((r) => (
+                  <li key={r.id} className="flex items-start gap-3 px-5 py-3 text-sm">
+                    {r.available ? <Check className="mt-0.5 size-4 text-go" aria-label="Ready" /> : <X className="mt-0.5 size-4 text-dust" aria-label="Not available" />}
+                    <div>
+                      <p>{r.displayName}</p>
+                      <p className="text-xs text-dust">{r.available ? Object.entries(r.details).map(([k, v]) => `${k}: ${v}`).join(', ') : r.reason}</p>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Disclosure>
         </Panel>
       </div>
     </>

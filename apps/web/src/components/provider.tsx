@@ -1,5 +1,7 @@
 import { CURSOR_PREFIX, HF_PREFIX, isHfModel, isOpenRouterModel, KNOWN_MODELS, openRouterSlug } from '@orbit/shared';
+import type { ReactNode } from 'react';
 import { cn } from '../lib/utils';
+import { Disclosure } from './ui';
 
 export type ProviderKey = 'claude' | 'codex' | 'openrouter' | 'huggingface' | 'cursor' | 'scripted' | null | undefined;
 
@@ -39,5 +41,27 @@ export function ProviderBadge({ provider, model, className, quiet }: { provider:
       <span className={cn('font-[600]', PROVIDER_TEXT[provider])}>{name}</span>
       {label && label !== name ? <span className="truncate text-dust">{label.replace(/^Claude /, '')}</span> : null}
     </span>
+  );
+}
+
+/**
+ * One AI on the Agents page: its name, what it is for and whether it is ready. The setup
+ * (keys, models, instructions) opens underneath, so the list stays short.
+ */
+export function AiRow({ dot, name, tagline, status, children, defaultOpen }: { dot: string; name: string; tagline: ReactNode; status: ReactNode; children: ReactNode; defaultOpen?: boolean }) {
+  return (
+    <Disclosure
+      title={
+        <span className="flex items-center gap-2">
+          <span className={cn('size-2 shrink-0 rounded-full', dot)} aria-hidden />
+          {name}
+        </span>
+      }
+      summary={tagline}
+      trailing={status}
+      defaultOpen={defaultOpen}
+    >
+      <div className="px-5 pb-5">{children}</div>
+    </Disclosure>
   );
 }

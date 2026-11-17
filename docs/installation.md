@@ -42,13 +42,11 @@ Orbit stores everything in `~/.orbit` (Windows: `%USERPROFILE%\.orbit`). Change 
 
 ## First run
 
-1. **Check your tools**: git, git identity, GitHub CLI.
-2. **GitHub**: `gh auth login` if you want pull requests.
-3. **Repositories**: add a path, scan a folder (one level deep), or clone from GitHub.
-4. **Asana**: paste a personal access token, or skip.
-5. **Map projects**: choose which repositories each Asana project may change.
-6. **Your AI team**: runtime, execution mode and consent for local commands.
-7. **First mission**: a small, concrete change in one project.
+1. **Add a project**: paste a folder path, or let Orbit find the Git projects in one folder.
+2. **Your AI**: Orbit lists the AI tools it found on this computer. Automatic is right for almost everyone.
+3. **Extras**: GitHub (for pull requests, `gh auth login`) and Asana (paste a personal access token). Both are optional.
+
+Then the workspace opens. Everything else lives under **Settings**: General, Agents, Skills, Connections and Activity. Autopilot asks for permission to run commands on this computer the first time a task needs it.
 
 ## Windows notes
 

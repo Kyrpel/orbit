@@ -40,6 +40,7 @@ describe('handing a session to another AI', () => {
         calls.push(req);
         if (!limited()) return emptyResult({ status: 'succeeded', durationMs: 5, numTurns: 1, sessionId: 'claude-1', text: 'Planned the discount: a new discount.js.' });
         writeFileSync(path.join(req.cwd, 'discount.js'), 'export const discount = (p) => p * 0.9;\n');
+        writeFileSync(path.join(req.cwd, 'config.js'), 'export const key = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789";\n');
         ctx.onEvent({ type: 'tool', tool: 'Bash', summary: 'Run npm test', step: 'run', target: 'npm test' });
         ctx.onEvent({ type: 'denied', tool: 'Bash', reason: 'needs approval', command: 'npm publish' });
         return emptyResult({ status: 'rate_limited', durationMs: 5, sessionId: 'claude-1', error: 'Claude AI usage limit reached' });
@@ -90,12 +91,15 @@ describe('handing a session to another AI', () => {
     expect(prompt).toContain('### What Claude changed while working on this message');
     expect(prompt).toContain('discount.js');
     expect(prompt).toContain('+export const discount = (p) => p * 0.9;');
+    // Secrets in the diff are scrubbed before another AI sees them.
+    expect(prompt).toContain('config.js');
+    expect(prompt).not.toContain('sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789');
     // Claude's earlier answer is Claude's, not "You".
     expect(prompt).toContain('Claude: Planned the discount: a new discount.js.');
     expect(prompt).not.toContain('You: Planned the discount');
     expect(prompt).toContain('Now build it');
     const d = orbit.chat.detail(s.id);
-    expect(d.events.some((e) => e.title === 'Handed over from Claude: 2 commands and 1 changed file passed on')).toBe(true);
+    expect(d.events.some((e) => e.title === 'Handed over from Claude: 2 commands and 2 changed files passed on')).toBe(true);
     expect(d.messages.at(-1)).toMatchObject({ status: 'done', content: 'Finished the discount.' });
   });
 

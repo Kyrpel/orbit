@@ -34,7 +34,7 @@ export const repos = sqliteTable('repos', {
   githubRepo: text('github_repo'),
   defaultBranch: text('default_branch').notNull(),
   allowModify: integer('allow_modify', { mode: 'boolean' }).notNull().default(true),
-  /** False for plain folders: they can be read as references but never changed. */
+  /** Plain folders support local editing; git is required for mission worktrees. */
   isGit: integer('is_git', { mode: 'boolean' }).notNull().default(true),
   setupCommands: text('setup_commands', { mode: 'json' }).$type<CommandSpec[]>().notNull().default(sql`'[]'`),
   verifyCommands: text('verify_commands', { mode: 'json' }).$type<CommandSpec[]>().notNull().default(sql`'[]'`),

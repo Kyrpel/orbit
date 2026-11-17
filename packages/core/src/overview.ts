@@ -6,12 +6,12 @@ import type { IntegrationService } from './integrations';
 import type { MissionService } from './missions';
 
 const ROLES: { role: TeamSeat; title: string; description: string }[] = [
-  { role: 'planner', title: 'Planner', description: 'Reads the task and your code, picks the right projects with evidence, and writes the plan and acceptance criteria.' },
-  { role: 'engineer', title: 'Engineer', description: 'Builds the approved plan in an isolated copy of your project and adds tests. Never commits or pushes.' },
-  { role: 'reviewer', title: 'Reviewer', description: 'Reads the real diff against the plan, using the check results Orbit ran itself. Works best as a different AI from the engineer.' },
-  { role: 'security', title: 'Security reviewer', description: 'Checks every Autopilot change, and your workspace changes when you click Check security, for leaked secrets, injection, missing auth checks and risky dependencies.' },
-  { role: 'prompter', title: 'Prompt engineer', description: 'Rewrites rough tasks into clear ones with acceptance criteria: your Asana tasks (Improve, then update in Asana) and your requests in the workspace (Improve).' },
-  { role: 'assistant', title: 'Session agent', description: 'Works with you in a project when you open it in the workspace, like Claude Code in a terminal: it edits the files directly and asks before running commands. Each session tab can also pick its own AI.' },
+  { role: 'planner', title: 'Planner', description: 'Reads the task and your project, works out where the change belongs, and writes the plan.' },
+  { role: 'engineer', title: 'Engineer', description: 'Builds the plan in a separate copy of your project and adds tests. It cannot commit or push: that takes your approval.' },
+  { role: 'reviewer', title: 'Reviewer', description: 'Reads every change against the plan and the results of your checks. Works best on a different AI from the engineer.' },
+  { role: 'security', title: 'Security reviewer', description: 'Looks for leaked passwords and keys, unsafe input handling and risky packages, in every Autopilot change and whenever you click Check security.' },
+  { role: 'prompter', title: 'Prompt engineer', description: 'Turns a rough request into a clear one. It is behind the Improve button in the Workspace and on your Asana tasks.' },
+  { role: 'assistant', title: 'Session agent', description: 'The one you talk to in the Workspace. It edits files in your project and asks before running commands.' },
 ];
 
 export class OverviewService {

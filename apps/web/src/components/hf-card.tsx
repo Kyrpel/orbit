@@ -5,6 +5,7 @@ import { parseHfRepository, type HfEndpointDTO, type HfHardwareDTO, type HfModel
 import { api, del, keys, post, useAction } from '../lib/api';
 import { cn } from '../lib/utils';
 import { InstructionsEditor } from './openrouter-card';
+import { AiRow } from './provider';
 import { Button, Input, Tag } from './ui';
 
 /*
@@ -32,6 +33,11 @@ const STATE: Record<string, { label: string; tone: 'success' | 'neutral' | 'acti
 
 const dollars = (n: number) => `$${n.toFixed(2)}`;
 
+/** Endpoint messages can include terminal colour codes from the model server's logs. */
+function cleanEndpointMessage(message: string): string {
+  return message.replace(/(?:\x1b\[|\u009b)[0-?]*[ -/]*[@-~]/g, '').trim();
+}
+
 function useHuggingFace(initial: HuggingFaceStatusDTO) {
   return useQuery({
     queryKey: HF_KEY,
@@ -50,6 +56,7 @@ function EndpointRow({ e }: { e: HfEndpointDTO }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const st = STATE[e.state] ?? { label: e.state, tone: 'neutral' as const };
   const quant = e.file?.match(/(I?Q\d+_[A-Z0-9]+(?:_[A-Z])?|BF16|F16)/i)?.[1];
+  const message = e.message ? cleanEndpointMessage(e.message) : '';
   return (
     <li className="py-2.5">
       <div className="flex flex-wrap items-center gap-2 text-sm">
@@ -58,7 +65,7 @@ function EndpointRow({ e }: { e: HfEndpointDTO }) {
           {e.state === 'scaledToZero' ? <Moon className="size-3" aria-hidden /> : null}
           {st.label}
         </Tag>
-        {!e.usable ? <Tag tone="attention">Not a llama.cpp model: sessions cannot use it</Tag> : null}
+        {!e.usable ? <Tag tone="neutral">Unsupported engine for Orbit</Tag> : null}
         <span className="ml-auto flex items-center gap-1">
           {e.state === 'paused' ? (
             <Button size="sm" onClick={() => resume.mutate(undefined)} loading={resume.isPending}>
@@ -91,8 +98,15 @@ function EndpointRow({ e }: { e: HfEndpointDTO }) {
         {e.hardware.pricePerHour != null ? ` · ${dollars(e.hardware.pricePerHour)}/hour while awake` : ''}
         {e.sleepAfterMinutes != null ? ` · sleeps after ${e.sleepAfterMinutes} min without use` : ' · never sleeps'}
       </p>
-      {e.state === 'failed' || e.state === 'updateFailed' ? <p className="mt-1 max-w-[78ch] text-2xs text-fault">{e.message ?? 'It failed to start.'} Open it on endpoints.huggingface.co to see its logs.</p> : null}
-      {MOVING.has(e.state) && e.message ? <p className="mt-1 text-2xs text-dust">{e.message}</p> : null}
+      {e.state === 'failed' || e.state === 'updateFailed' ? (
+        <details className="mt-1 text-2xs text-dust">
+          <summary className="cursor-pointer select-none">Deployment error details</summary>
+          <p className="mt-1">Hugging Face reported this error for the deployment. It may be from an earlier attempt.</p>
+          <pre className="mono mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-[7px] bg-hull-2 p-2 text-2xs text-chalk">{message || 'No error details were provided.'}</pre>
+          <a href="https://endpoints.huggingface.co/" target="_blank" rel="noreferrer" className="mt-1 inline-block text-telemetry hover:underline">Open Hugging Face to view deployment logs</a>
+        </details>
+      ) : null}
+      {MOVING.has(e.state) && message ? <p className="mt-1 text-2xs text-dust">{message}</p> : null}
       {e.usable ? <InstructionsEditor id={`hf-${e.name}`} label={e.name} value={e.instructions} save={(t) => post(`/api/huggingface/endpoints/${e.name}/instructions`, { instructions: t })} /> : null}
     </li>
   );
@@ -279,24 +293,26 @@ export function HuggingFaceCard({ status: initial }: { status: HuggingFaceStatus
   const invalidate = [HF_KEY, keys.team];
   const connect = useAction((t: string) => post<HuggingFaceStatusDTO>('/api/huggingface/token', { token: t }), { success: 'Hugging Face connected', invalidate });
   const disconnect = useAction(() => del<HuggingFaceStatusDTO>('/api/huggingface/token'), { success: 'Hugging Face disconnected', invalidate });
+  // Keep Orbit-created deployments visible even if their engine configuration needs attention.
+  const endpoints = status.endpoints.filter((e) => e.usable || e.createdByOrbit);
+  const otherEndpoints = status.endpoints.filter((e) => !e.usable && !e.createdByOrbit);
 
   return (
-    <div className="rounded-[10px] border border-seam px-4 py-3 md:col-span-2">
-      <div className="flex items-center gap-2">
-        <span className="size-2 rounded-full bg-huggingface" aria-hidden />
-        <span className="font-[620]">Hugging Face</span>
-        <span className="text-2xs text-dust">your own models on rented GPUs</span>
-        {status.connected ? (
-          <Tag tone="success" className="ml-auto">
+    <AiRow
+      dot="bg-huggingface"
+      name="Hugging Face"
+      tagline={status.connected && endpoints.length ? `${endpoints.length} ${endpoints.length === 1 ? 'endpoint' : 'endpoints'} for Orbit` : 'Your own models on GPUs you rent by the hour'}
+      status={
+        status.connected ? (
+          <Tag tone="success">
             <Check className="size-3" aria-hidden /> {status.account ? `Connected as ${status.account}` : 'Connected'}
           </Tag>
         ) : (
-          <Tag tone="neutral" className="ml-auto">
-            Not connected
-          </Tag>
-        )}
-      </div>
-      <p className="mt-1.5 max-w-[78ch] text-2xs text-dust">
+          <Tag tone="neutral">Not connected</Tag>
+        )
+      }
+    >
+      <p className="max-w-[78ch] text-2xs text-dust">
         Run a model from Hugging Face (a GGUF file) on a GPU you rent by the hour, then choose Hugging Face as the AI in a session. It runs inside Claude Code's tools with your Hugging Face token, never your Claude login, and Hugging Face bills you only while it is awake.
       </p>
 
@@ -332,20 +348,31 @@ export function HuggingFaceCard({ status: initial }: { status: HuggingFaceStatus
 
       {status.connected ? (
         <div className="mt-3 border-t border-seam pt-2">
-          <p className="text-2xs font-[600] uppercase tracking-[0.04em] text-dust">Your endpoints</p>
-          {status.endpoints.length ? (
-            <ul className="divide-y divide-seam">
-              {status.endpoints.map((e) => (
+          <p className="text-2xs font-[600] uppercase tracking-[0.04em] text-dust">Endpoints for Orbit</p>
+          {endpoints.length ? (
+            <ul className="divide-y divide-seam" aria-label="Endpoints for Orbit">
+              {endpoints.map((e) => (
                 <EndpointRow key={e.name} e={e} />
               ))}
             </ul>
           ) : (
-            <p className="py-2 text-xs text-dust">None yet. Paste a model link below to rent a GPU for it.</p>
+            <p className="py-2 text-xs text-dust">No endpoints for Orbit yet. Paste a GGUF model link below to create one.</p>
           )}
+          {otherEndpoints.length ? (
+            <details className="mt-2 border-t border-seam pt-2 text-xs text-dust">
+              <summary className="cursor-pointer select-none">Other Hugging Face deployments ({otherEndpoints.length})</summary>
+              <p className="mt-2 max-w-[78ch] text-2xs">These deployments use engines that Orbit sessions cannot use. They include earlier deployments from your Hugging Face account; their saved status and errors belong to those deployments.</p>
+              <ul className="divide-y divide-seam text-chalk" aria-label="Other Hugging Face deployments">
+                {otherEndpoints.map((e) => (
+                  <EndpointRow key={e.name} e={e} />
+                ))}
+              </ul>
+            </details>
+          ) : null}
         </div>
       ) : null}
 
       <NewEndpoint status={status} />
-    </div>
+    </AiRow>
   );
 }

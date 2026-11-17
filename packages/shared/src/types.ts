@@ -65,7 +65,7 @@ export interface RepoDTO {
   github: { owner: string; repo: string } | null;
   defaultBranch: string;
   allowModify: boolean;
-  /** False for a plain folder: readable as a reference, never changed. */
+  /** False for a plain folder: local sessions work, but git features and mission worktrees do not. */
   isGit: boolean;
   setupCommands: CommandSpec[];
   verifyCommands: CommandSpec[];

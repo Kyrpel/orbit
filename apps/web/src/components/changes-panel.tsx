@@ -85,7 +85,7 @@ export function ChangesPanel({ repo, running, editEvents, open, onClose, docked 
             <ErrorNote error={changes.error} />
           </div>
         ) : !data?.isGit ? (
-          <p className="px-4 py-6 text-sm text-dust">This folder is not a git repository, so Orbit cannot list or commit its changes.</p>
+          <p className="px-4 py-6 text-sm text-dust">Session edits are saved directly in this folder. Git is needed to track diffs, commit changes or restore files with rewind.</p>
         ) : !count ? (
           <div className="px-5 py-10 text-center">
             <p className="casual text-base font-[650]">Nothing changed yet</p>

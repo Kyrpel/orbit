@@ -264,7 +264,7 @@ export function usePrompt(o: PromptOptions) {
   const fileResults = useQuery({
     queryKey: ['files', o.repo.id, typed],
     queryFn: () => api<string[]>(`/api/repos/${o.repo.id}/files?q=${encodeURIComponent(typed)}`),
-    enabled: mentionQuery != null && !mentionQuery.startsWith('past:') && o.repo.isGit && !o.security,
+    enabled: mentionQuery != null && !mentionQuery.startsWith('past:') && !o.security,
     staleTime: 10_000,
     placeholderData: (previous) => previous,
   });
@@ -457,8 +457,8 @@ export function usePrompt(o: PromptOptions) {
     },
     { name: 'clear', aliases: ['new'], hint: 'Start a new session here', run: () => commands.clear() },
     ...(commands.changes ? [{ name: 'changes', aliases: ['diff'], hint: 'See what changed, commit or check security', run: () => commands.changes!() }] : []),
-    ...(commands.commit ? [{ name: 'commit', hint: 'Commit the changes: /commit <message>', run: (a: string) => commands.commit!(a) }] : []),
-    ...(commands.security ? [{ name: 'security', hint: 'Check the uncommitted changes for security problems', run: () => commands.security!() }] : []),
+    ...(commands.commit && o.repo.isGit ? [{ name: 'commit', hint: 'Commit the changes: /commit <message>', run: (a: string) => commands.commit!(a) }] : []),
+    ...(commands.security && o.repo.isGit ? [{ name: 'security', hint: 'Check the uncommitted changes for security problems', run: () => commands.security!() }] : []),
     { name: 'improve', hint: 'Let the prompt engineer improve a request: /improve <text>', run: improveText },
     ...(o.running && o.onStop ? [{ name: 'stop', hint: 'Interrupt the agent (esc)', run: () => o.onStop!() }] : []),
     ...(commands.expand ? [{ name: 'full', hint: 'Show this session full size', run: () => commands.expand!() }] : []),

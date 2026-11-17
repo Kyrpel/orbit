@@ -1,22 +1,23 @@
-import { Bot, GitPullRequest, Plus } from 'lucide-react';
+import { Bot, Plus } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router';
 import type { ExternalTaskDTO } from '@orbit/shared';
 import { ImproveTaskButton } from '../components/improve-task';
 import { MissionList } from '../components/mission-row';
 import { NewMissionDialog } from '../components/new-mission';
-import { Button, Empty, ErrorNote, Loading, PageHeader, Panel, PanelHeader } from '../components/ui';
+import { Button, ErrorNote, Loading, PageHeader, Panel, PanelHeader } from '../components/ui';
 import { keys, post, useAction, useOverview } from '../lib/api';
-import { timeAgo } from '../lib/utils';
 
 const ROLE: Record<string, string> = { planner: 'Planner', engineer: 'Engineer', reviewer: 'Reviewer', security: 'Security reviewer' };
 
-function summary(attention: number, active: number): string {
-  if (attention === 0 && active === 0) return 'Nothing is waiting for you and no Autopilot task is running.';
-  const a = attention === 0 ? 'Nothing needs your decision' : attention === 1 ? 'One mission needs your decision' : `${attention} missions need your decision`;
-  const b = active === 0 ? 'no agents are working' : active === 1 ? 'one mission is in flight' : `${active} missions are in flight`;
-  return `${a}, and ${b}.`;
-}
+/** What happens to a task, in order. Shown while there is nothing else to show. */
+const STEPS = [
+  { who: 'You', what: 'describe the task in a sentence or two.' },
+  { who: 'The planner', what: 'reads your project and writes a plan.' },
+  { who: 'The engineer', what: 'builds it in a separate copy, so your files stay as they are.' },
+  { who: 'The reviewers', what: 'run your checks and read every change.' },
+  { who: 'You', what: 'look at the result and approve it, or ask for changes.' },
+];
 
 function SuggestionRow({ t }: { t: ExternalTaskDTO & { projectName: string } }) {
   const run = useAction(
@@ -25,7 +26,7 @@ function SuggestionRow({ t }: { t: ExternalTaskDTO & { projectName: string } }) 
         if (r[0]?.error) throw new Error(r[0].error);
         return r;
       }),
-    { success: 'Mission created from Asana', invalidate: [keys.overview, ['missions']] },
+    { success: 'Task started from Asana', invalidate: [keys.overview, ['missions']] },
   );
   return (
     <li className="flex items-center gap-4 px-5 py-3">
@@ -50,21 +51,21 @@ export function TodayPage() {
   if (overview.isPending) return <Loading />;
   if (overview.error) return <ErrorNote error={overview.error} />;
   const o = overview.data;
+  const quiet = !o.attention.length && !o.active.length && !o.recent.length && !o.suggestions.length;
+  const week = [
+    o.counts.completed7d ? `${o.counts.completed7d} finished this week` : null,
+    o.counts.prsOpened ? `${o.counts.prsOpened} pull ${o.counts.prsOpened === 1 ? 'request' : 'requests'} opened` : null,
+  ].filter(Boolean);
 
   return (
     <>
       <PageHeader
         title="Autopilot"
-        description={
-          <>
-            Hand a whole task to your AI team: the planner plans it, the engineer builds it in a separate copy of the project, the reviewer and the security reviewer check it, and you approve before anything is committed or pushed.{' '}
-            <span className="text-chalk">{summary(o.counts.attention, o.counts.activeMissions)}</span>
-          </>
-        }
+        description="Hand over a whole task. Your agents plan it, build it and check it, and nothing reaches your project until you approve."
         action={
           <>
             <Link to="/missions">
-              <Button>All tasks</Button>
+              <Button variant="ghost">All tasks</Button>
             </Link>
             <Button variant="primary" onClick={() => setCreating(true)}>
               <Plus className="size-4" /> New task
@@ -78,60 +79,69 @@ export function TodayPage() {
         <Panel className="mb-6 border-signal/40">
           <div className="flex flex-wrap items-center justify-between gap-4 px-5 py-4">
             <div>
-              <p className="text-sm font-[600]">{!o.setup.hasRepos ? 'Connect a repository to start' : 'Your AI team is not configured yet'}</p>
-              <p className="text-xs text-dust">{!o.setup.hasRepos ? 'Orbit only works on repositories you explicitly connect.' : 'Connect an AI: sign in to Claude Code or Codex, or set an Anthropic API key.'}</p>
+              <p className="text-sm font-[600]">{!o.setup.hasRepos ? 'Add a project to start' : 'No AI is connected yet'}</p>
+              <p className="text-xs text-dust">{!o.setup.hasRepos ? 'Autopilot works in the projects you add to Orbit.' : 'Sign in to Claude Code or Codex on this computer, then come back.'}</p>
             </div>
-            <Link to={!o.setup.hasRepos ? '/setup' : '/agents'}>
+            <Link to={!o.setup.hasRepos ? '/projects' : '/agents'}>
               <Button variant="primary" size="sm">
-                {!o.setup.hasRepos ? 'Open setup' : 'Open AI team'}
+                {!o.setup.hasRepos ? 'Add a project' : 'Open Agents'}
               </Button>
             </Link>
           </div>
         </Panel>
       ) : null}
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_340px]">
+      {quiet ? (
+        <Panel>
+          <div className="px-6 py-7">
+            <h2 className="text-lg">No tasks yet. Here is what happens when you start one</h2>
+            <ol className="mt-4 max-w-[64ch] space-y-2.5">
+              {STEPS.map((s, i) => (
+                <li key={i} className="flex gap-3 text-sm">
+                  <span className="grid size-5 shrink-0 place-items-center rounded-full bg-hull-3 text-2xs font-[650] tabular text-dust" aria-hidden>
+                    {i + 1}
+                  </span>
+                  <span>
+                    <span className="font-[600]">{s.who}</span> <span className="text-dust">{s.what}</span>
+                  </span>
+                </li>
+              ))}
+            </ol>
+            <p className="mt-5 max-w-[64ch] text-xs text-dust">For quick questions and small edits, the Workspace is faster. Autopilot is for work you want done while you do something else.</p>
+          </div>
+        </Panel>
+      ) : (
         <div className="space-y-6">
-          <Panel>
-            <PanelHeader title="Waiting on you" description="Scope approvals, change reviews and pull requests only you can approve." />
-            {o.attention.length ? <MissionList missions={o.attention} /> : <Empty title="Nothing needs you right now.">When an agent finishes or needs a decision, it shows up here first.</Empty>}
-          </Panel>
-          <Panel>
-            <PanelHeader title="In flight" description="Missions agents are working on." />
-            {o.active.length ? <MissionList missions={o.active} /> : <Empty title="No missions in flight.">Start one from a task, or post /orbit run on an Asana task.</Empty>}
-          </Panel>
-          {o.recent.length ? (
-            <Panel>
-              <PanelHeader title="Recently finished" />
-              <MissionList missions={o.recent} />
+          {o.attention.length ? (
+            <Panel className="border-signal/50">
+              <PanelHeader title="Waiting for you" description="These stopped for a decision only you can make." />
+              <MissionList missions={o.attention} />
             </Panel>
           ) : null}
-        </div>
 
-        <div className="space-y-6">
-          <Panel>
-            <PanelHeader title="Agents at work" />
-            {o.runningAgents.length ? (
-              <ul className="divide-y divide-seam">
-                {o.runningAgents.map((a) => (
-                  <li key={a.runId} className="px-5 py-3">
-                    <Link to={`/missions/${a.missionId}`} className="flex items-center gap-2 text-sm text-chalk hover:underline">
-                      <Bot className="size-4 text-telemetry" aria-hidden />
-                      {ROLE[a.role]} on {a.missionTitle}
-                    </Link>
-                    <p className="mt-1 truncate text-2xs text-dust">{a.lastEvent ?? 'Starting'}</p>
-                    <p className="text-2xs text-dust-2">started {timeAgo(a.startedAt)}</p>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="px-5 py-5 text-sm text-dust">All agents are idle. They only run when a mission needs them.</p>
-            )}
-          </Panel>
+          {o.active.length ? (
+            <Panel>
+              <PanelHeader title="In progress" />
+              <MissionList missions={o.active} />
+              {o.runningAgents.length ? (
+                <ul className="border-t border-seam bg-night/40 px-5 py-3 text-xs text-dust">
+                  {o.runningAgents.map((a) => (
+                    <li key={a.runId} className="flex min-w-0 items-center gap-2 py-0.5">
+                      <Bot className="size-3.5 shrink-0 text-telemetry" aria-hidden />
+                      <Link to={`/missions/${a.missionId}`} className="shrink-0 font-[600] text-chalk hover:underline">
+                        {ROLE[a.role] ?? a.role}
+                      </Link>
+                      <span className="truncate">{a.lastEvent ?? 'Starting'}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </Panel>
+          ) : null}
 
           {o.suggestions.length ? (
             <Panel>
-              <PanelHeader title="Ready to run" description="Open Asana tasks without a mission." />
+              <PanelHeader title="Ready to run" description="Open tasks from Asana that Autopilot has not started." />
               <ul className="divide-y divide-seam">
                 {o.suggestions.map((t) => (
                   <SuggestionRow key={t.id} t={t} />
@@ -140,23 +150,16 @@ export function TodayPage() {
             </Panel>
           ) : null}
 
-          <Panel>
-            <div className="grid grid-cols-2 divide-x divide-seam">
-              <div className="px-5 py-4">
-                <p className="text-2xl font-[640] tabular">{o.counts.completed7d}</p>
-                <p className="text-2xs text-dust">missions finished this week</p>
-              </div>
-              <div className="px-5 py-4">
-                <p className="flex items-center gap-2 text-2xl font-[640] tabular">
-                  <GitPullRequest className="size-5 text-go" aria-hidden />
-                  {o.counts.prsOpened}
-                </p>
-                <p className="text-2xs text-dust">pull requests opened</p>
-              </div>
-            </div>
-          </Panel>
+          {o.recent.length ? (
+            <Panel>
+              <PanelHeader title="Recently finished" description={week.length ? week.join(' · ') : undefined} />
+              <MissionList missions={o.recent} />
+            </Panel>
+          ) : null}
+
+          {!o.attention.length && !o.active.length ? <p className="px-1 text-sm text-dust">Nothing is running and nothing is waiting for you.</p> : null}
         </div>
-      </div>
+      )}
     </>
   );
 }

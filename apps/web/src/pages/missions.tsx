@@ -1,5 +1,6 @@
-import { Plus } from 'lucide-react';
+import { ArrowLeft, Plus } from 'lucide-react';
 import { useState } from 'react';
+import { Link } from 'react-router';
 import { MissionList } from '../components/mission-row';
 import { NewMissionDialog } from '../components/new-mission';
 import { Button, Empty, ErrorNote, Loading, PageHeader, Panel, Tabs, TabsList, TabsTrigger } from '../components/ui';
@@ -8,10 +9,10 @@ import { useMissions } from '../lib/api';
 type Filter = 'attention' | 'active' | 'done' | 'all';
 
 const EMPTY: Record<Filter, { title: string; body: string }> = {
-  attention: { title: 'Nothing needs you.', body: 'Scope approvals, reviews and pull request approvals appear here.' },
-  active: { title: 'No missions in flight.', body: 'Start one with New mission, from Projects, or with /orbit run on an Asana task.' },
-  done: { title: 'Nothing finished yet.', body: 'Finished, published and cancelled missions are kept here with their full history.' },
-  all: { title: 'No missions yet.', body: 'A mission turns one task into a reviewed change. Start your first one.' },
+  attention: { title: 'Nothing is waiting for you.', body: 'When a task needs a decision or is ready to review, it shows up here.' },
+  active: { title: 'Nothing is running.', body: 'Start one with New task, or comment /orbit run on an Asana task.' },
+  done: { title: 'Nothing finished yet.', body: 'Finished and cancelled tasks are kept here with their full history.' },
+  all: { title: 'No tasks yet.', body: 'Autopilot turns one task into a reviewed change. Start your first one with New task.' },
 };
 
 export function MissionsPage() {
@@ -20,12 +21,15 @@ export function MissionsPage() {
   const missions = useMissions(filter);
   return (
     <>
+      <Link to="/autopilot" className="mb-5 inline-flex items-center gap-1.5 text-xs text-dust hover:text-chalk">
+        <ArrowLeft className="size-3.5" aria-hidden /> Autopilot
+      </Link>
       <PageHeader
-        title="Missions"
-        description="Every task Orbit has worked on, with its plan, changes, checks and decisions."
+        title="All tasks"
+        description="Everything you handed to Autopilot, with its plan, changes and checks."
         action={
           <Button variant="primary" onClick={() => setCreating(true)}>
-            <Plus className="size-4" /> New mission
+            <Plus className="size-4" /> New task
           </Button>
         }
       />
@@ -33,8 +37,8 @@ export function MissionsPage() {
       <Panel>
         <Tabs value={filter} onValueChange={(v) => setFilter(v as Filter)}>
           <TabsList>
-            <TabsTrigger value="attention">Needs you</TabsTrigger>
-            <TabsTrigger value="active">In flight</TabsTrigger>
+            <TabsTrigger value="attention">Waiting for you</TabsTrigger>
+            <TabsTrigger value="active">In progress</TabsTrigger>
             <TabsTrigger value="done">Finished</TabsTrigger>
             <TabsTrigger value="all">All</TabsTrigger>
           </TabsList>

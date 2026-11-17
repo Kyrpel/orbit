@@ -5,6 +5,7 @@ import { codexEffort, redactSecrets, type AgentPlanItem, type StepOutput } from 
 import { emptyResult, isUsageLimitError, type AgentEvent, type AgentImage, type AgentRunContext, type AgentRunRequest, type AgentRunResult, type AgentRunStatus } from './runtime';
 import { codexWebArgs, codexWebStep, shellName, unwrapShellCommand, type CodexWebAction } from './codex-cli';
 import { addedFile, outputPreview, unifiedDiff } from './output';
+import { exitedWithin, releaseOutputOnExit, stopProcess } from './process-tree';
 
 /**
  * Working sessions on Codex through its app-server (JSON-RPC over stdio) instead of
@@ -158,6 +159,9 @@ export async function runCodexAppServer(opts: { bin: string; env: Record<string,
     stderr.push(d.toString());
     if (stderr.length > 40) stderr.shift();
   });
+  // On Windows `codex` is a .cmd launcher: if something under it keeps the output open, stop
+  // reading once the launcher is gone instead of waiting forever.
+  const release = releaseOutputOnExit(sub);
 
   let nextId = 1;
   const pending = new Map<number, { resolve: (v: Json) => void; reject: (e: Error) => void }>();
@@ -278,10 +282,12 @@ export async function runCodexAppServer(opts: { bin: string; env: Record<string,
     timedOut = true;
     void interrupt();
   }, req.timeoutMs);
+  let killTimer: NodeJS.Timeout | undefined;
   const interrupt = async () => {
     stopSteering();
+    // Codex may never answer the interrupt: stop the process (and all it started) regardless.
+    killTimer ??= setTimeout(() => stopProcess(sub, controller, opts.platform), 3000);
     if (threadId && turnId) await call('turn/interrupt', { threadId, turnId }).catch(() => undefined);
-    setTimeout(() => controller.abort(), 3000);
   };
   const onAbort = () => void interrupt();
   if (ctx.signal.aborted) onAbort();
@@ -308,10 +314,14 @@ export async function runCodexAppServer(opts: { bin: string; env: Record<string,
   } finally {
     clearTimeout(timer);
     ctx.signal.removeEventListener('abort', onAbort);
+    if (killTimer) clearTimeout(killTimer);
     stopSteering();
     sub.stdin?.end();
-    controller.abort();
+    // Codex exits when its input closes; if it does not, stop it and everything it started.
+    if (await exitedWithin(sub, 3000)) controller.abort();
+    else stopProcess(sub, controller, opts.platform);
     await sub.catch(() => undefined);
+    release();
   }
 
   const errText = turnError ?? (turnStatus ? null : stderr.join('').slice(-1500) || 'Codex stopped without finishing the answer.');

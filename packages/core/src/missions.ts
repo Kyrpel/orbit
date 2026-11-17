@@ -520,12 +520,12 @@ export class MissionService {
       const rows = this.repoService.rowsByIds(input.repoIds);
       if (rows.length !== new Set(input.repoIds).size) throw new OrbitError('VALIDATION', 'One or more repositories are not connected to Orbit.');
       const folders = rows.filter((r) => !r.isGit);
-      if (folders.length) throw new OrbitError('FORBIDDEN', `${folders.map((r) => r.name).join(', ')} is a folder without git, so Orbit can only read it. Add it as a reference project instead.`);
+      if (folders.length) throw new OrbitError('FORBIDDEN', `${folders.map((r) => r.name).join(', ')} has no git repository. Work on it in a local session; Autopilot missions need git to create isolated worktrees.`);
       const locked = rows.filter((r) => !r.allowModify);
       if (locked.length) throw new OrbitError('FORBIDDEN', `Orbit is not allowed to modify ${locked.map((r) => r.name).join(', ')}. Enable it in Projects first.`);
       requested = rows.map((r) => r.id);
     } else if (!input.source) {
-      const modifiable = this.ctx.db.select().from(repos).where(eq(repos.allowModify, true)).all();
+      const modifiable = this.ctx.db.select().from(repos).where(and(eq(repos.allowModify, true), eq(repos.isGit, true))).all();
       if (modifiable.length === 1) requested = [modifiable[0]!.id];
       else throw new OrbitError('VALIDATION', modifiable.length === 0 ? 'Connect a repository first.' : 'Choose which repository this mission should change.');
     }
@@ -617,7 +617,7 @@ export class MissionService {
     const rows = this.repoService.rowsByIds(chosen);
     if (rows.length !== new Set(chosen).size) throw new OrbitError('VALIDATION', 'Unknown repository in selection.');
     const folders = rows.filter((r) => !r.isGit);
-    if (folders.length) throw new OrbitError('FORBIDDEN', `${folders.map((r) => r.name).join(', ')} is a folder without git, so Orbit can only read it. Add it as a reference project instead.`);
+    if (folders.length) throw new OrbitError('FORBIDDEN', `${folders.map((r) => r.name).join(', ')} has no git repository. Work on it in a local session; Autopilot missions need git to create isolated worktrees.`);
     const locked = rows.filter((r) => !r.allowModify);
     if (locked.length) throw new OrbitError('FORBIDDEN', `Orbit is not allowed to modify ${locked.map((r) => r.name).join(', ')}.`);
     const ts = nowIso(this.ctx);
