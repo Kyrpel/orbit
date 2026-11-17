@@ -109,8 +109,9 @@ function RepoRow({ repo }: { repo: RepoDTO }) {
   const [confirm, setConfirm] = useState(false);
   const toggle = useAction((allowModify: boolean) => patch(`/api/repos/${repo.id}`, { allowModify }), { invalidate: [keys.repos] });
   const remove = useAction(() => del(`/api/repos/${repo.id}`), { success: `Removed ${repo.name} from Orbit. The folder was not touched.`, invalidate: [keys.repos] });
-  const checks = repo.verifyCommands.filter((c) => c.enabled).length;
-  const facts = [repo.summary?.languages.slice(0, 3).join(', '), repo.isGit ? `branch ${repo.defaultBranch}` : 'plain folder', repo.isGit && checks ? `${checks} ${checks === 1 ? 'check' : 'checks'}` : null].filter(Boolean);
+  // Setup and check commands also run in sessions without asking, so every project shows them.
+  const checks = [...repo.setupCommands, ...repo.verifyCommands].filter((c) => c.enabled).length;
+  const facts = [repo.summary?.languages.slice(0, 3).join(', '), repo.isGit ? `branch ${repo.defaultBranch}` : 'plain folder', checks ? `${checks} ${checks === 1 ? 'command' : 'commands'} run without asking` : null].filter(Boolean);
   return (
     <li className="flex flex-wrap items-center gap-x-4 gap-y-2 px-5 py-3.5">
       <div className="min-w-0 flex-1">
@@ -143,11 +144,9 @@ function RepoRow({ repo }: { repo: RepoDTO }) {
             AI may edit files
             <Switch checked={repo.allowModify} onCheckedChange={(v) => toggle.mutate(v)} label={`Let the AI edit files in ${repo.name}`} />
           </label>
-          {repo.isGit ? (
-            <Button size="sm" variant="ghost" onClick={() => setEditing(true)} title="The commands Autopilot runs to test its work">
-              <ListChecks className="size-3.5" /> Checks
-            </Button>
-          ) : null}
+          <Button size="sm" variant="ghost" onClick={() => setEditing(true)} title="Setup and test commands: Autopilot runs them to check its work, and sessions may run them without asking">
+            <ListChecks className="size-3.5" /> Checks
+          </Button>
           <Button size="icon" variant="ghost" aria-label={`Remove ${repo.name} from Orbit`} title="Remove from Orbit" onClick={() => setConfirm(true)}>
             <Trash2 className="size-4" />
           </Button>
