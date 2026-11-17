@@ -116,20 +116,15 @@ describe('local sessions in plain folders', () => {
     expect(now).toMatchObject({ isGit: true, allowModify: true, defaultBranch: 'main' });
   });
 
-  it('upgrades folders forced read-only by older versions while preserving explicit choices', async () => {
+  it('never turns on editing for a read-only folder by itself: only you can', async () => {
+    // A plain folder that an older version connected as read-only.
     const legacy = await orbit.repos.register(folder, { allowModify: false });
-    const readonlyFolder = path.join(root, 'readonly');
-    mkdirSync(readonlyFolder);
-    const explicit = await orbit.repos.register(readonlyFolder, { allowModify: false });
-    for (const repo of [legacy, explicit]) {
-      orbit.ctx.sqlite.prepare('INSERT INTO audit_log (ts, actor, action, target, summary) VALUES (?, ?, ?, ?, ?)')
-        .run(new Date().toISOString(), 'user', 'repo.connected', repo.id, `Connected folder ${repo.name} (${repo.localPath}) as read-only: it is not a git repository`);
-    }
-    orbit.repos.update(explicit.id, { allowModify: false });
+    orbit.ctx.sqlite.prepare('INSERT INTO audit_log (ts, actor, action, target, summary) VALUES (?, ?, ?, ?, ?)')
+      .run(new Date().toISOString(), 'user', 'repo.connected', legacy.id, `Connected folder ${legacy.name} (${legacy.localPath}) as read-only: it is not a git repository`);
+    // Upgrading (or a database where the retired 0014 never ran) changes nothing.
     orbit.ctx.sqlite.prepare('DELETE FROM __orbit_migrations WHERE id = ?').run('0014_plain_folder_sessions');
-    expect(runMigrations(orbit.ctx.sqlite)).toEqual(['0014_plain_folder_sessions']);
-    expect(orbit.repos.get(legacy.id).allowModify).toBe(true);
-    expect(orbit.repos.get(explicit.id).allowModify).toBe(false);
     expect(runMigrations(orbit.ctx.sqlite)).toEqual([]);
+    expect(orbit.repos.get(legacy.id).allowModify).toBe(false);
+    expect(orbit.repos.update(legacy.id, { allowModify: true }).allowModify).toBe(true);
   });
 });
